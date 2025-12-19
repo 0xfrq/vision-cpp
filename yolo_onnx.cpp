@@ -6,9 +6,34 @@ YoloONNX::YoloONNX(const std::string& model_path)
     session_options.SetIntraOpNumThreads(1);
     session_options.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_BASIC);
-
     session = Ort::Session(env, model_path.c_str(), session_options);
+    
+    printModelInfo();  
 }
+
+void YoloONNX::printModelInfo() {
+    Ort::AllocatorWithDefaultOptions allocator;
+
+    size_t num_inputs = session.GetInputCount();
+    for (size_t i = 0; i < num_inputs; i++) {
+        char* input_name = session.GetInputName(i, allocator);
+
+        std::cout << "Input " << i << " name: " << input_name << std::endl;
+
+        allocator.Free(input_name);
+    }
+
+    size_t num_outputs = session.GetOutputCount();
+    for (size_t i = 0; i < num_outputs; i++) {
+        char* output_name = session.GetOutputName(i, allocator);
+
+        std::cout << "Output " << i << " name: " << output_name << std::endl;
+
+        allocator.Free(output_name);
+    }
+}
+
+
 
 std::vector<Detection> YoloONNX::infer(const cv::Mat& image)
 {

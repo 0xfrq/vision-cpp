@@ -1,10 +1,8 @@
 file(REMOVE_RECURSE
   "CMakeFiles/vision.dir/main.cpp.o"
-  "CMakeFiles/vision.dir/main.cpp.o.d"
   "CMakeFiles/vision.dir/yolo_onnx.cpp.o"
-  "CMakeFiles/vision.dir/yolo_onnx.cpp.o.d"
-  "vision"
   "vision.pdb"
+  "vision"
 )
 
 # Per-language clean rules from dependency scanning.

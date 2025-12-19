@@ -14,13 +14,12 @@ class YoloONNX {
 public:
     YoloONNX(const std::string& model_path);
     std::vector<Detection> infer(const cv::Mat& image);
+    void printModelInfo();  
 
 private:
     Ort::Env env;
     Ort::Session session{nullptr};
     Ort::SessionOptions session_options;
-
     int input_width = 416;
     int input_height = 416;
 };
-
