@@ -1,0 +1,3 @@
+/home/fariq/Desktop/onnxruntime-linux-x64-1.7.0/build/CMakeFiles/vision.dir
+/home/fariq/Desktop/onnxruntime-linux-x64-1.7.0/build/CMakeFiles/edit_cache.dir
+/home/fariq/Desktop/onnxruntime-linux-x64-1.7.0/build/CMakeFiles/rebuild_cache.dir
