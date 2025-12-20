@@ -2,52 +2,94 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <chrono>
+#include <iomanip>
+
+using namespace std;
+using namespace cv;
 
 int main() {
-    std::cout << "Loading YOLO model..." << std::endl;
+    // load model yolo
+    cout << "Loading YOLO model..." << endl;
     YoloONNX yolo("best.onnx");
-    std::cout << "Model loaded successfully!" << std::endl;
+    cout << "Model loaded successfully!" << endl;
     
-    std::cout << "Opening camera..." << std::endl;
-    cv::VideoCapture cap(0);
+    // buka kamera
+    cout << "Opening camera..." << endl;
+    VideoCapture cap(0);
     
     if (!cap.isOpened()) {
-        std::cerr << "ERROR: Cannot open camera!" << std::endl;
+        cerr << "ERROR: Cannot open camera!" << endl;
         return -1;
     }
-    std::cout << "Camera opened successfully!" << std::endl;
+    cout << "Camera opened successfully!" << endl;
     
+    // set resolusi kamera lebih rendah untuk fps lebih tinggi
     cap.set(CV_CAP_PROP_FRAME_WIDTH, 320);
     cap.set(CV_CAP_PROP_FRAME_HEIGHT, 240);
     
+    double fps = 0;
+    
     while (true) {
-        cv::Mat frame;
+        auto frame_start = chrono::high_resolution_clock::now();
+        
+        Mat frame;
         cap >> frame;
         
         if (frame.empty()) {
-            std::cerr << "ERROR: Empty frame!" << std::endl;
+            cerr << "ERROR: Empty frame!" << endl;
             break;
         }
         
-        std::cout << "Processing frame..." << std::endl;
+        // jalankan inferensi deteksi
         auto detections = yolo.infer(frame);
-        std::cout << "Detections: " << detections.size() << std::endl;
         
+        // gambar hasil deteksi
         for (auto& det : detections) {
-            cv::rectangle(frame, det.box, cv::Scalar(0,255,0), 2);
-            cv::Point center(
-                det.box.x + det.box.width / 2,
-                det.box.y + det.box.height / 2
-            );
-            cv::circle(frame, center, 3, cv::Scalar(0,0,255), -1);
-            std::cout << "Ball @ (" << center.x << "," << center.y
-                      << ") area=" << det.box.area() << std::endl;
+            // clamping bounding box ke batas frame
+            int x = max(0, det.box.x);
+            int y = max(0, det.box.y);
+            int w = min(det.box.width, frame.cols - x);
+            int h = min(det.box.height, frame.rows - y);
+            
+            // skip box yang tidak valid
+            if (w <= 0 || h <= 0 || x >= frame.cols || y >= frame.rows) continue;
+            
+            Rect clamped_box(x, y, w, h);
+            
+            // gambar bounding box hijau
+            rectangle(frame, clamped_box, Scalar(0, 255, 0), 2);
+            
+            // gambar confidence value simple
+            char conf_str[16];
+            snprintf(conf_str, sizeof(conf_str), "%.0f%%", det.conf * 100);
+            putText(frame, conf_str, Point(x, y - 5),
+                   FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0, 255, 0), 1);
+            
+            // gambar titik pusat deteksi
+            Point center(x + w / 2, y + h / 2);
+            circle(frame, center, 3, Scalar(0, 0, 255), -1);
+        }
+        // hitung fps
+        auto frame_end = chrono::high_resolution_clock::now();
+        chrono::duration<double> frame_duration = frame_end - frame_start;
+        
+        if (frame_duration.count() > 0) {
+            fps = 0.9 * fps + 0.1 * (1.0 / frame_duration.count());
         }
         
-        cv::imshow("VISION_CPP", frame);
-        if (cv::waitKey(1) == 27) break;
+        // tampilkan fps dengan format simple
+        char fps_str[32];
+        snprintf(fps_str, sizeof(fps_str), "FPS: %.1f", fps);
+        putText(frame, fps_str, Point(10, 20), 
+                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+        
+        imshow("VISION_CPP - Object Detection", frame);
+        if (waitKey(1) == 27) break;
     }
     
-    std::cout << "Program ended." << std::endl;
+    cout << "Program ended." << endl;
+    cap.release();
+    destroyAllWindows();
     return 0;
 }
