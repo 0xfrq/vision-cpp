@@ -115,6 +115,7 @@ vision: /usr/lib/x86_64-linux-gnu/libopencv_stitching.so.2.4.9
 vision: /usr/lib/x86_64-linux-gnu/libopencv_ocl.so.2.4.9
 vision: /usr/lib/x86_64-linux-gnu/libopencv_gpu.so.2.4.9
 vision: /usr/lib/x86_64-linux-gnu/libopencv_contrib.so.2.4.9
+vision: /home/fariq/Desktop/onnxruntime-linux-x64-1.7.0/lib/libonnxruntime.so.1.7.0
 vision: /usr/lib/x86_64-linux-gnu/libopencv_photo.so.2.4.9
 vision: /usr/lib/x86_64-linux-gnu/libopencv_legacy.so.2.4.9
 vision: /usr/lib/x86_64-linux-gnu/libopencv_video.so.2.4.9

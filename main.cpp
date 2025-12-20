@@ -36,11 +36,6 @@ int main() {
         Mat frame;
         cap >> frame;
         
-        if (frame.empty()) {
-            cerr << "ERROR: Empty frame!" << endl;
-            break;
-        }
-        
         // jalankan inferensi deteksi
         auto detections = yolo.infer(frame);
         
@@ -52,23 +47,14 @@ int main() {
             int w = min(det.box.width, frame.cols - x);
             int h = min(det.box.height, frame.rows - y);
             
-            // skip box yang tidak valid
-            if (w <= 0 || h <= 0 || x >= frame.cols || y >= frame.rows) continue;
-            
-            Rect clamped_box(x, y, w, h);
-            
-            // gambar bounding box hijau
-            rectangle(frame, clamped_box, Scalar(0, 255, 0), 2);
+            // gambar bounding box hijau (tipis untuk kecepatan)
+            rectangle(frame, Rect(x, y, w, h), Scalar(0, 255, 0), 1);
             
             // gambar confidence value simple
             char conf_str[16];
             snprintf(conf_str, sizeof(conf_str), "%.0f%%", det.conf * 100);
             putText(frame, conf_str, Point(x, y - 5),
-                   FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0, 255, 0), 1);
-            
-            // gambar titik pusat deteksi
-            Point center(x + w / 2, y + h / 2);
-            circle(frame, center, 3, Scalar(0, 0, 255), -1);
+                   FONT_HERSHEY_SIMPLEX, 0.3, Scalar(0, 255, 0), 1);
         }
         // hitung fps
         auto frame_end = chrono::high_resolution_clock::now();

@@ -52,21 +52,18 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
     cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
     cv::split(resized, channels);
     
-    // HWC ke CHW dengan concatenate channel (lebih cepat dari nested loop)
-    vector<float> input_tensor_values;
-    input_tensor_values.reserve(1 * 3 * input_width * input_height);
+    // HWC ke CHW dengan memcpy (paling cepat)
+    int channel_size = input_width * input_height;
+    vector<float> input_tensor_values(3 * channel_size);
     
     // copy R channel
-    float* r_data = channels[0].ptr<float>();
-    input_tensor_values.insert(input_tensor_values.end(), r_data, r_data + input_width * input_height);
+    memcpy(input_tensor_values.data(), channels[0].ptr<float>(), channel_size * sizeof(float));
     
     // copy G channel
-    float* g_data = channels[1].ptr<float>();
-    input_tensor_values.insert(input_tensor_values.end(), g_data, g_data + input_width * input_height);
+    memcpy(input_tensor_values.data() + channel_size, channels[1].ptr<float>(), channel_size * sizeof(float));
     
     // copy B channel
-    float* b_data = channels[2].ptr<float>();
-    input_tensor_values.insert(input_tensor_values.end(), b_data, b_data + input_width * input_height);
+    memcpy(input_tensor_values.data() + 2 * channel_size, channels[2].ptr<float>(), channel_size * sizeof(float));
     
     array<int64_t, 4> input_shape{1, 3, input_height, input_width};
     Ort::MemoryInfo memory_info =
@@ -110,28 +107,16 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
         float h  = output[i * elements + 3];
         float conf = output[i * elements + 4];
         
-        // filter confidence threshold 
-        if (conf < 0.5) continue;
+        // filter confidence threshold yang lebih tinggi untuk skip deteksi lemah
+        if (conf < 0.55) continue;
         
-        // scale koordinat ke ukuran frame asli
-        float cx_scaled = cx * scale_x;
-        float cy_scaled = cy * scale_y;
-        float w_scaled = w * scale_x;
-        float h_scaled = h * scale_y;
+        // scale koordinat ke ukuran frame asli tanpa clamp (lebih cepat)
+        int x = (int)(cx * scale_x - (w * scale_x) / 2);
+        int y = (int)(cy * scale_y - (h * scale_y) / 2);
+        int width = (int)(w * scale_x);
+        int height = (int)(h * scale_y);
         
-        // konversi dari center coordinates ke top-left corner
-        int x = static_cast<int>(cx_scaled - w_scaled / 2);
-        int y = static_cast<int>(cy_scaled - h_scaled / 2);
-        int width = static_cast<int>(w_scaled);
-        int height = static_cast<int>(h_scaled);
-        
-        // clamp koordinat ke batas frame
-        x = max(0, min(x, orig_width - 1));
-        y = max(0, min(y, orig_height - 1));
-        width = max(1, min(width, orig_width - x));
-        height = max(1, min(height, orig_height - y));
-        
-        // simpan semua deteksi valid (multiple detections)
+        // simpan deteksi tanpa boundary check
         Detection det;
         det.box = cv::Rect(x, y, width, height);
         det.conf = conf;
