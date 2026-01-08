@@ -10,6 +10,8 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <mutex>
 
 #include "yolo_onnx.hpp"
 
@@ -106,6 +108,62 @@ void extractHSV(const Mat& img, const Rect& b) {
 }
 
 /* =========================
+   THREADED VIDEO CAPTURE (matching Python WebcamVideoStream)
+   ========================= */
+class ThreadedCapture {
+private:
+    VideoCapture cap;
+    Mat frame;
+    bool stopped;
+    mutex frameMutex;
+    thread captureThread;
+    
+    void update() {
+        while(!stopped) {
+            Mat temp;
+            cap >> temp;
+            if(!temp.empty()) {
+                lock_guard<mutex> lock(frameMutex);
+                frame = temp.clone();
+            }
+        }
+    }
+    
+public:
+    ThreadedCapture(int src) : stopped(false) {
+        cap.open(src);
+        cap.set(CAP_PROP_FPS, 60);
+        cap.set(CAP_PROP_FRAME_WIDTH, 320);
+        cap.set(CAP_PROP_FRAME_HEIGHT, 240);
+        
+        if(!cap.isOpened()) {
+            ROS_ERROR("Camera failed to open");
+            return;
+        }
+        
+        cap >> frame;  // grab first frame
+        captureThread = thread(&ThreadedCapture::update, this);
+    }
+    
+    Mat read() {
+        lock_guard<mutex> lock(frameMutex);
+        return frame.clone();
+    }
+    
+    void stop() {
+        stopped = true;
+        if(captureThread.joinable()) {
+            captureThread.join();
+        }
+        cap.release();
+    }
+    
+    ~ThreadedCapture() {
+        stop();
+    }
+};
+
+/* =========================
    FIELD MASKING
    ========================= */
 Mat extractField(const Mat& img) {
@@ -160,22 +218,14 @@ int main(int argc,char**argv){
     string pkg=ros::package::getPath("vision_cpp");
     YoloONNX yolo(pkg+"/src/best.onnx");
 
-    VideoCapture cap(0);
-    cap.set(CAP_PROP_FRAME_WIDTH,320);
-    cap.set(CAP_PROP_FRAME_HEIGHT,240);
-
-    if(!cap.isOpened()){
-        ROS_ERROR("Camera failed");
-        return -1;
-    }
-
-    auto last_time=chrono::steady_clock::now();
+    // Use threaded capture (matching Python WebcamVideoStream)
+    ThreadedCapture capture(0);
+    
     last_seen=ros::Time::now().toSec();
 
     while(ros::ok()){
 
-        Mat frame;
-        cap>>frame;
+        Mat frame = capture.read();
         if(frame.empty()) continue;
 
         /* ===== YOLO ===== */
