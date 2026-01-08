@@ -175,7 +175,7 @@ struct ScanArea {
         y_max = min(frame_size.height, y_max + 30);
     }
     
-    bool contains(Point2f pt) {
+    bool contains(Point2f pt) const {
         return pt.x >= x_min && pt.x <= x_max && 
                pt.y >= y_min && pt.y <= y_max;
     }
