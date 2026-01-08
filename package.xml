@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>vision_cpp</name>
+  <version>0.0.1</version>
+  <description>yolo cpp ros node</description>
+
+  <maintainer email="robotis@robotis.com">robotis</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+<build_depend>roscpp</build_depend>
+<build_depend>roslib</build_depend>
+<build_depend>std_msgs</build_depend>
+<build_depend>message_runtime</build_depend>
+<build_depend>v2_detection</build_depend>
+
+<!-- runtime dependencies -->
+<exec_depend>roscpp</exec_depend>
+<exec_depend>roslib</exec_depend>
+<exec_depend>std_msgs</exec_depend>
+<exec_depend>message_runtime</exec_depend>
+<exec_depend>v2_detection</exec_depend>
+
+</package>
