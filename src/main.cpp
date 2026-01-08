@@ -504,14 +504,37 @@ int main(int argc,char**argv){
                            Scalar(255,0,255), 3, LINE_AA, 0, 0.3);
                 
                 // Predicted trajectory path with acceleration (cyan)
-                if(norm(acceleration) > 0.1 && consecutive_found > 3) {
+                if(norm(acceleration) > 0.05 && consecutive_found > 3) {
                     vector<Point2f> trajectory_points;
                     Point2f current_pos = center;
                     Point2f current_vel = smooth_velocity;
+                    Point2f current_acc = acceleration;
                     
-                    // Simulate next 8 frames with acceleration
-                    for(int i = 1; i <= 8; i++) {
-                        current_vel += acceleration * 0.5f;  // Apply acceleration
+                    // Adaptive prediction length based on ball distance (smaller = farther = longer prediction)
+                    // Ball area: 2000-4000 = far, 4000-8000 = mid, 8000+ = close
+                    int prediction_frames;
+                    if(ball_area < 3000) {
+                        prediction_frames = 25;  // Far: predict 25 frames ahead
+                    } else if(ball_area < 6000) {
+                        prediction_frames = 18;  // Mid: predict 18 frames
+                    } else {
+                        prediction_frames = 12;  // Close: predict 12 frames
+                    }
+                    
+                    // Physics-based simulation with damping
+                    const float acc_damping = 0.95f;      // Acceleration decay
+                    const float vel_damping = 0.98f;      // Velocity decay (air resistance)
+                    
+                    // Simulate trajectory with improved physics
+                    for(int i = 1; i <= prediction_frames; i++) {
+                        // Apply acceleration with damping
+                        current_vel += current_acc * 0.8f;
+                        current_acc *= acc_damping;  // Acceleration decays over time
+                        
+                        // Apply velocity damping (air resistance)
+                        current_vel *= vel_damping;
+                        
+                        // Update position
                         current_pos += current_vel;
                         
                         // Bounds check
@@ -520,15 +543,39 @@ int main(int argc,char**argv){
                             break;
                         }
                         
-                        trajectory_points.push_back(current_pos);
+                        // Store every 2nd point for far distances, every point for close
+                        if(ball_area > 6000 || i % 2 == 0) {
+                            trajectory_points.push_back(current_pos);
+                        }
                     }
                     
-                    // Draw trajectory dots with fading opacity
-                    for(size_t i = 0; i < trajectory_points.size(); i++) {
-                        float alpha = 1.0f - (i / (float)trajectory_points.size());
-                        int radius = max(2, 5 - (int)i);
-                        circle(display_frame, Point(trajectory_points[i]), radius, 
-                              Scalar(255,255,0), -1, LINE_AA);  // Cyan dots
+                    // Draw trajectory with enhanced visualization
+                    if(!trajectory_points.empty()) {
+                        // Draw connecting line for better visibility at distance
+                        for(size_t i = 0; i < trajectory_points.size() - 1; i++) {
+                            float alpha = 1.0f - (i / (float)trajectory_points.size());
+                            int intensity = (int)(alpha * 200) + 55;  // Range: 55-255
+                            line(display_frame, Point(trajectory_points[i]), 
+                                Point(trajectory_points[i+1]),
+                                Scalar(intensity, intensity, 0), 1, LINE_AA);  // Cyan line
+                        }
+                        
+                        // Draw dots on trajectory points
+                        for(size_t i = 0; i < trajectory_points.size(); i++) {
+                            float alpha = 1.0f - (i / (float)trajectory_points.size());
+                            // Larger dots for far distances
+                            int radius = (ball_area < 4000) ? max(3, 6 - (int)(i/3)) : max(2, 5 - (int)i);
+                            int intensity = (int)(alpha * 200) + 55;
+                            circle(display_frame, Point(trajectory_points[i]), radius, 
+                                  Scalar(intensity, intensity, 0), -1, LINE_AA);  // Cyan dots
+                        }
+                        
+                        // Draw endpoint marker (predicted landing)
+                        if(trajectory_points.size() > 5) {
+                            Point2f endpoint = trajectory_points.back();
+                            circle(display_frame, Point(endpoint), 8, Scalar(0,255,255), 2, LINE_AA);
+                            circle(display_frame, Point(endpoint), 2, Scalar(0,255,255), -1, LINE_AA);
+                        }
                     }
                 }
                 
@@ -542,9 +589,21 @@ int main(int argc,char**argv){
                 // Direction indicator text
                 float angle = atan2(smooth_velocity.y, smooth_velocity.x) * 180.0 / M_PI;
                 char dir_text[50];
-                snprintf(dir_text, sizeof(dir_text), "Dir: %.0f deg", angle);
+                snprintf(dir_text, sizeof(dir_text), "Dir: %.0f deg | Acc: %.2f", 
+                         angle, norm(acceleration));
                 putText(display_frame, dir_text, Point(5, 85), 
                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(255,0,255), 1);
+                
+                // Distance estimate based on ball area
+                const char* distance_str;
+                if(ball_area < 3000) distance_str = "FAR";
+                else if(ball_area < 6000) distance_str = "MID";
+                else distance_str = "CLOSE";
+                
+                char dist_text[50];
+                snprintf(dist_text, sizeof(dist_text), "Range: %s (Area:%d)", distance_str, ball_area);
+                putText(display_frame, dist_text, Point(5, 100), 
+                       FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0,255,255), 1);
             }
         }else{
             bs.ball_status="NOTFOUND";
