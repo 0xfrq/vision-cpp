@@ -53,23 +53,6 @@ bool initialized = false;
 std::deque<Point2f> velocity_history;
 constexpr int VELOCITY_HISTORY_SIZE = 5;
 
-// Position history for exit tracking
-struct PositionRecord {
-    Point2f position;
-    double timestamp;
-    Point2f velocity;
-    int area;
-};
-std::deque<PositionRecord> position_history;
-constexpr int POSITION_HISTORY_SIZE = 10;  // Last 10 positions
-
-// Exit tracking
-Point2f last_known_position(0,0);
-Point2f exit_velocity(0,0);
-std::string exit_direction = "";
-double exit_timestamp = 0.0;
-bool ball_exited_frame = false;
-
 int ball_area = 0;
 int smooth_area = 0;
 Rect last_box;
@@ -438,22 +421,6 @@ int main(int argc,char**argv){
                 // Update last velocity for next frame
                 last_velocity = smooth_velocity;
                 
-                // Store position in history buffer
-                PositionRecord record;
-                record.position = best_center;
-                record.timestamp = ros::Time::now().toSec();
-                record.velocity = smooth_velocity;
-                record.area = best_area;
-                
-                position_history.push_back(record);
-                if(position_history.size() > POSITION_HISTORY_SIZE) {
-                    position_history.pop_front();
-                }
-                
-                // Update last known position
-                last_known_position = best_center;
-                ball_exited_frame = false;
-                
                 // Direct assignment
                 center=best_center;
                 smooth_center=best_center;
@@ -487,57 +454,6 @@ int main(int argc,char**argv){
                 hsv_fail++;
                 consecutive_lost++;
                 consecutive_found=0;
-                
-                // Detect if ball exited frame and analyze exit direction
-                if(consecutive_lost == 1 && !ball_exited_frame && !position_history.empty()) {
-                    // Ball just lost - analyze last known trajectory
-                    ball_exited_frame = true;
-                    exit_velocity = smooth_velocity;
-                    exit_timestamp = ros::Time::now().toSec();
-                    
-                    // Determine exit direction based on velocity and position
-                    float vel_x = exit_velocity.x;
-                    float vel_y = exit_velocity.y;
-                    float pos_x = last_known_position.x;
-                    float pos_y = last_known_position.y;
-                    
-                    // Analyze which edge the ball is heading towards
-                    std::vector<std::string> directions;
-                    
-                    if(vel_x > 2.0f) directions.push_back("RIGHT");
-                    else if(vel_x < -2.0f) directions.push_back("LEFT");
-                    
-                    if(vel_y > 2.0f) directions.push_back("DOWN");
-                    else if(vel_y < -2.0f) directions.push_back("UP");
-                    
-                    // Combine directions
-                    if(directions.empty()) {
-                        exit_direction = "STATIONARY";
-                    } else if(directions.size() == 1) {
-                        exit_direction = directions[0];
-                    } else {
-                        exit_direction = directions[0] + "-" + directions[1];
-                    }
-                    
-                    // Log detailed exit information
-                    ROS_WARN("\n========== BALL EXIT DETECTED ==========");
-                    ROS_WARN("Exit Direction: %s", exit_direction.c_str());
-                    ROS_WARN("Exit Velocity: (%.2f, %.2f) px/frame", vel_x, vel_y);
-                    ROS_WARN("Exit Speed: %.2f px/frame", norm(exit_velocity));
-                    ROS_WARN("Last Position: (%.1f, %.1f)", pos_x, pos_y);
-                    ROS_WARN("Last Area: %d", ball_area);
-                    
-                    // Log last few positions
-                    ROS_WARN("Last %d positions:", (int)position_history.size());
-                    for(int i = position_history.size() - 1; i >= 0; i--) {
-                        auto& rec = position_history[i];
-                        double time_ago = exit_timestamp - rec.timestamp;
-                        ROS_WARN("  [%.2fs ago] Pos:(%.1f,%.1f) Vel:(%.2f,%.2f) Area:%d",
-                                time_ago, rec.position.x, rec.position.y,
-                                rec.velocity.x, rec.velocity.y, rec.area);
-                    }
-                    ROS_WARN("========================================\n");
-                }
                 
                 // Lock-in mechanism: don't lose tracking immediately
                 if(consecutive_lost > LOCK_OUT_THRESHOLD){
@@ -692,28 +608,6 @@ int main(int argc,char**argv){
         }else{
             bs.ball_status="NOTFOUND";
             pub_state.publish(bs);
-            
-            // Display exit information if ball recently exited
-            if(ball_exited_frame && !exit_direction.empty()) {
-                char exit_text[100];
-                snprintf(exit_text, sizeof(exit_text), "BALL EXITED: %s", exit_direction.c_str());
-                putText(display_frame, exit_text, Point(5, 120), 
-                       FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 255), 2);
-                
-                char vel_text[100];
-                snprintf(vel_text, sizeof(vel_text), "Exit Vel: (%.1f, %.1f) Speed:%.1f",
-                        exit_velocity.x, exit_velocity.y, norm(exit_velocity));
-                putText(display_frame, vel_text, Point(5, 145), 
-                       FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0, 0, 255), 1);
-                
-                // Draw exit arrow from last known position
-                if(norm(exit_velocity) > 1.0) {
-                    Point2f arrow_end = last_known_position + exit_velocity * 10.0f;
-                    arrowedLine(display_frame, Point(last_known_position), Point(arrow_end),
-                               Scalar(0, 0, 255), 3, LINE_AA, 0, 0.3);
-                    circle(display_frame, Point(last_known_position), 8, Scalar(0, 0, 255), 2);
-                }
-            }
         }
         
         // Calculate and display FPS
