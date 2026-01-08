@@ -61,13 +61,13 @@ int consecutive_found = 0;   // Lock-in counter
 int consecutive_lost = 0;    // Loss counter
 
 /* Params - Matching Python's direct tracking behavior */
-constexpr int HSV_FAIL_MAX = 15;        // Increased tolerance
+constexpr int HSV_FAIL_MAX = 10;        // Increased tolerance
 constexpr float POS_ALPHA = 0.0f;       // Direct position (no smoothing like Python)
 constexpr float AREA_ALPHA = 0.0f;      // Direct area (no smoothing like Python)  
 constexpr float VEL_ALPHA = 0.0f;       // No velocity prediction (match Python)
-constexpr int YOLO_SKIP_FRAMES = 2;     // Skip YOLO when tracking well
-constexpr int LOCK_IN_THRESHOLD = 2;    // Frames needed to lock tracking
-constexpr int LOCK_OUT_THRESHOLD =34;  // Frames needed to lose tracking
+constexpr int YOLO_SKIP_FRAMES = 3;     // Skip YOLO when tracking well
+constexpr int LOCK_IN_THRESHOLD = 3;    // Frames needed to lock tracking
+constexpr int LOCK_OUT_THRESHOLD =20;  // Frames needed to lose tracking
 
 /* FPS Tracking */
 int frame_counter = 0;
