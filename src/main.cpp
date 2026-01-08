@@ -272,8 +272,8 @@ int main(int argc,char**argv){
             bool yolo_found = false;
             
             for(auto&d:dets){
-                // Lower confidence for faster detection (0.4 instead of 0.5)
-                if(d.class_id!=0 || d.conf<0.4f) continue;
+                // Lower confidence for faster initial detection
+                if(d.class_id!=0 || d.conf<0.35f) continue;
 
                 Rect b=d.box;
                 Point2f nc(b.x+b.width/2.f,b.y+b.height/2.f);
@@ -289,12 +289,12 @@ int main(int argc,char**argv){
                 initialized=true;
                 last_box=b;
 
-                // Calculate scan area based on ball size (wider for stability)
+                // Calculate focused scan area
                 int in_area;
                 if(ball_area <= 5000){
-                    in_area = int(b.width * 4);  // Wider scan for small balls
+                    in_area = int(b.width * 2.5);  // Narrower for precision
                 }else{
-                    in_area = b.width + 50;      // Wider scan for large balls
+                    in_area = b.width + 30;        // Focused area
                 }
                 scan_x={int(center.x-in_area),int(center.x+in_area)};
 
@@ -342,10 +342,10 @@ int main(int argc,char**argv){
             Mat hsv,mask;
             cvtColor(track_frame,hsv,COLOR_BGR2HSV);
             
-            // Expand HSV range when losing track to improve recovery
-            int h_expand = min(consecutive_lost * 2, 10);  // Up to 10 units
-            int s_expand = min(consecutive_lost * 5, 30);  // Up to 30 units
-            int v_expand = min(consecutive_lost * 5, 40);  // Up to 40 units
+            // Minimal adaptive HSV expansion - stay strict to avoid false positives
+            int h_expand = min(consecutive_lost * 1, 5);   // Max 5 units
+            int s_expand = min(consecutive_lost * 2, 15);  // Max 15 units
+            int v_expand = min(consecutive_lost * 3, 25);  // Max 25 units
             
             int adaptive_min_h = max(0, min_h - h_expand);
             int adaptive_max_h = min(180, max_h + h_expand);
@@ -375,25 +375,72 @@ int main(int argc,char**argv){
 
             for(auto&c:contours){
                 double a=contourArea(c);
-                // Very lenient area filtering: 12% to 150%
-                if(a<ball_area*0.12||a>ball_area*1.5) continue;
-                if(a<1500) continue; // Even lower minimum threshold
+                // Stricter area filtering to avoid false positives: 20% to 120%
+                if(a<ball_area*0.20||a>ball_area*1.20) continue;
+                if(a<2000) continue; // Minimum area for actual ball
 
                 Rect r=boundingRect(c);
                 int cx=r.x+r.width/2;
                 int cy=r.y+r.height/2;
                 
-                // Much wider scan area for fast balls and occlusions
-                int expanded_scan = (scan_x[1]-scan_x[0])*2.0;  // 2x wider
+                // Reasonable scan area - not too wide to avoid false positives
+                int expanded_scan = (scan_x[1]-scan_x[0])*1.2;  // 1.2x wider
                 int scan_center = (scan_x[0]+scan_x[1])/2;
                 if(cx<scan_center-expanded_scan||cx>scan_center+expanded_scan) continue;
 
+                // ===== BALL SHAPE VALIDATION =====
+                // 1. Circularity check (balls are round!)
+                double perimeter = arcLength(c, true);
+                double circularity = (4 * M_PI * a) / (perimeter * perimeter);
+                if(circularity < 0.5) continue; // Skip non-circular objects
+                
+                // 2. Aspect ratio check (balls are squarish in bounding box)
+                float aspect = (float)r.width / max(r.height, 1);
+                if(aspect < 0.6 || aspect > 1.7) continue; // Skip elongated objects
+                
+                // 3. Solidity check (filled vs convex - balls are solid)
+                vector<Point> hull;
+                convexHull(c, hull);
+                double hull_area = contourArea(hull);
+                double solidity = a / max(hull_area, 1.0);
+                if(solidity < 0.75) continue; // Skip hollow/irregular objects
+                
+                // 4. HSV color re-verification at center to avoid wrong-colored objects
+                int verify_x = clamp(cx, 0, hsv.cols-1);
+                int verify_y = clamp(cy, 0, hsv.rows-1);
+                Vec3b center_hsv = hsv.at<Vec3b>(verify_y, verify_x);
+                int h_val = center_hsv[0];
+                int s_val = center_hsv[1];
+                int v_val = center_hsv[2];
+                
+                // Check if center pixel is within STRICT original HSV range (no expansion)
+                bool color_match = (h_val >= min_h && h_val <= max_h &&
+                                   s_val >= min_s && s_val <= max_s &&
+                                   v_val >= min_v && v_val <= max_v);
+                if(!color_match) continue; // Skip objects with wrong color at center
+
                 Point2f nc(cx,cy);
                 
-                // Score based on distance to predicted position + area similarity
-                float dist = norm(nc - predicted_center);
+                // ===== MULTI-FACTOR SCORING =====
+                // Distance to last known position (not prediction - more stable)
+                float dist = norm(nc - center);
+                float dist_score = 1.0f / (1.0f + dist/80.0f);
+                
+                // Area similarity
                 float area_diff = abs(a - ball_area) / (float)ball_area;
-                float score = 1.0f / (1.0f + dist/100.0f + area_diff*2.0f);
+                float area_score = 1.0f / (1.0f + area_diff*5.0f);
+                
+                // Shape quality (circularity + aspect ratio)
+                float shape_score = circularity * (1.0f - abs(aspect - 1.0f)*0.3f);
+                
+                // Solidity bonus
+                float solidity_score = solidity;
+                
+                // Combined weighted score
+                float score = dist_score * 0.35f +      // Position continuity
+                            area_score * 0.25f +         // Size consistency  
+                            shape_score * 0.25f +        // Shape quality (roundness)
+                            solidity_score * 0.15f;      // Filled object
                 
                 if(score > best_score) {
                     best_score = score;
@@ -404,8 +451,13 @@ int main(int argc,char**argv){
                 }
             }
 
+            // Require minimum confidence score to accept detection
+            if(found && best_score < 0.5) {
+                found = false;  // Reject low-confidence detections
+            }
+
             if(found){
-                // Calculate velocity for next frame prediction
+                // Update velocity for display only (not for prediction)
                 last_velocity = best_center - center;
                 
                 // Direct assignment
@@ -415,12 +467,12 @@ int main(int argc,char**argv){
                 smooth_area=best_area;
                 last_box=best_box;
 
-                // Update scan area dynamically
+                // Update scan area with moderate width
                 int in_area;
                 if(ball_area <= 5000){
-                    in_area = int(best_box.width * 4);
+                    in_area = int(best_box.width * 2.5);
                 }else{
-                    in_area = best_box.width + 50;
+                    in_area = best_box.width + 30;
                 }
                 scan_x={int(center.x-in_area),int(center.x+in_area)};
                 
@@ -451,25 +503,14 @@ int main(int argc,char**argv){
                 consecutive_lost++;
                 consecutive_found=0;
                 
-                // Lock-in mechanism: don't lose tracking immediately
-                if(consecutive_lost > LOCK_OUT_THRESHOLD){
+                // Stricter loss detection - go back to YOLO sooner
+                if(consecutive_lost > 12){  // Reduced from 35 to 12
                     state=NOTFOUND;
                     initialized=false;
                     last_velocity=Point2f(0,0);
-                    ROS_INFO("Track lost after %d frames - switching to YOLO", consecutive_lost);
-                } else {
-                    // Try prediction during temporary loss
-                    center = center + last_velocity;
-                    center.x = clamp(center.x, 0.f, (float)frame.cols-1);
-                    center.y = clamp(center.y, 0.f, (float)frame.rows-1);
-                    
-                    // Still publish during prediction
-                    v2_detection::BallCoordinate bc_pred;
-                    bc_pred.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                    bc_pred.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                    bc_pred.obj_size=ball_area;
-                    pub_coord.publish(bc_pred);
+                    ROS_INFO("Track lost - switching to YOLO for re-detection");
                 }
+                // Don't publish during loss - wait for valid detection
             }
         }
 
