@@ -56,11 +56,32 @@ vector<int> scan_x(2,0);
 double last_seen = 0.0;
 int hsv_fail = 0;
 
-/* Params */
+/* Params - Optimized for fast ball tracking */
 constexpr int HSV_FAIL_MAX = 6;
-constexpr float POS_ALPHA = 0.35f;
-constexpr float AREA_ALPHA = 0.25f;
-constexpr float VEL_ALPHA = 0.4f;
+constexpr float POS_ALPHA = 0.5f;      // Increased from 0.35 for faster response
+constexpr float AREA_ALPHA = 0.3f;     // Increased from 0.25 for faster adaptation
+constexpr float VEL_ALPHA = 0.6f;      // Increased from 0.4 for better prediction
+
+/* FPS Tracking */
+int frame_counter = 0;
+double fps_start_time = 0.0;
+double fps = 0.0;
+constexpr double FPS_DISPLAY_INTERVAL = 0.2;
+
+/* =========================
+   FPS CALCULATOR
+   ========================= */
+void calculate_fps() {
+    frame_counter++;
+    double current_time = ros::Time::now().toSec();
+    double elapsed = current_time - fps_start_time;
+    
+    if(elapsed >= FPS_DISPLAY_INTERVAL) {
+        fps = frame_counter / elapsed;
+        frame_counter = 0;
+        fps_start_time = current_time;
+    }
+}
 
 /* =========================
    HSV SAMPLING (PY PORT)
@@ -209,24 +230,33 @@ int main(int argc,char**argv){
     ros::NodeHandle nh;
 
     auto pub_state = nh.advertise<v2_detection::BallState>(
-        "/DEWO/image_processing/deteksi_bola/ball_state",1);
+        "/DEWO/image_processing/deteksi_bola/ball_state",10);
     auto pub_coord = nh.advertise<v2_detection::BallCoordinate>(
-        "/DEWO/image_processing/deteksi_bola/coordinate",1);
+        "/DEWO/image_processing/deteksi_bola/coordinate",10);
     auto pub_area  = nh.advertise<v2_detection::Ballarea>(
-        "/DEWO/image_processing/deteksi_bola/ball_area",1);
+        "/DEWO/image_processing/deteksi_bola/ball_area",10);
 
     string pkg=ros::package::getPath("vision_cpp");
     YoloONNX yolo(pkg+"/src/best.onnx");
 
     // Use threaded capture (matching Python WebcamVideoStream)
+    ROS_INFO("Initializing threaded camera capture...");
     ThreadedCapture capture(0);
     
+    fps_start_time = ros::Time::now().toSec();
     last_seen=ros::Time::now().toSec();
+    
+    ROS_INFO("Vision system ready - starting main loop");
 
     while(ros::ok()){
 
         Mat frame = capture.read();
-        if(frame.empty()) continue;
+        if(frame.empty()) {
+            ros::spinOnce();
+            continue;
+        }
+        
+        Mat display_frame = frame.clone();
 
         /* ===== YOLO ===== */
         if(state==NOTFOUND){
@@ -244,6 +274,7 @@ int main(int argc,char**argv){
                     velocity=Point2f(0,0);
                     smooth_area=na;
                     initialized=true;
+                    ROS_INFO("Ball detected - initializing tracker at (%.1f, %.1f)", nc.x, nc.y);
                 }else{
                     Point2f delta=nc-smooth_center;
                     velocity=(1-VEL_ALPHA)*velocity + VEL_ALPHA*delta;
@@ -268,6 +299,23 @@ int main(int argc,char**argv){
                 last_seen=ros::Time::now().toSec();
                 hsv_fail=0;
                 state=FOUND;
+                
+                // Immediate publish on detection for fast response
+                v2_detection::BallState bs_immediate;
+                v2_detection::BallCoordinate bc_immediate;
+                v2_detection::Ballarea ba_immediate;
+                
+                bs_immediate.ball_status="FOUND";
+                bc_immediate.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
+                bc_immediate.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
+                bc_immediate.obj_size=ball_area;
+                ba_immediate.ballarea=ball_area;
+                
+                pub_state.publish(bs_immediate);
+                pub_coord.publish(bc_immediate);
+                pub_area.publish(ba_immediate);
+                
+                ROS_INFO_THROTTLE(0.5, "YOLO: Ball found - Area:%d, Conf:%.2f", ball_area, d.conf);
                 break;
             }
         }
@@ -320,9 +368,17 @@ int main(int argc,char**argv){
                 if(now-last_seen<=timeout){
                     last_seen=now;
                     found=true;
+                    
+                    // Immediate publish during tracking for responsiveness
+                    v2_detection::BallCoordinate bc_track;
+                    bc_track.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
+                    bc_track.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
+                    bc_track.obj_size=ball_area;
+                    pub_coord.publish(bc_track);
                 }else{
                     state=NOTFOUND;
                     initialized=false;
+                    ROS_INFO_THROTTLE(2.0, "Track timeout - switching to YOLO search");
                 }
                 break;
             }
@@ -349,20 +405,43 @@ int main(int argc,char**argv){
             ba.ballarea=ball_area;
             pub_coord.publish(bc);
             pub_area.publish(ba);
-            rectangle(frame,last_box,Scalar(0,255,255),2);
+            rectangle(display_frame,last_box,Scalar(0,255,255),2);
             
-            // Debug output (matching Python)
-            ROS_INFO_THROTTLE(1.0, "Ball Area: %d, Center: (%.1f, %.1f)", 
-                             ball_area, center.x, center.y);
+            // Draw center point
+            circle(display_frame, Point(int(center.x), int(center.y)), 5, Scalar(0,0,255), -1);
+            
+            // Debug output (matching Python) - throttled to reduce overhead
+            ROS_INFO_THROTTLE(1.0, "Ball Area: %d, Center: (%.1f, %.1f), FPS: %.1f", 
+                             ball_area, center.x, center.y, fps);
         }else{
             bs.ball_status="NOTFOUND";
         }
 
         pub_state.publish(bs);
-        imshow("VISION_CPP",frame);
+        
+        // Calculate and display FPS
+        calculate_fps();
+        
+        // Draw FPS and status on display
+        char fps_text[50];
+        snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", fps);
+        putText(display_frame, fps_text, Point(5, 15), 
+                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
+        
+        char status_text[50];
+        snprintf(status_text, sizeof(status_text), "%s", 
+                 state==FOUND ? "TRACKING" : "SEARCHING");
+        putText(display_frame, status_text, Point(5, 35), 
+                FONT_HERSHEY_SIMPLEX, 0.5, 
+                state==FOUND ? Scalar(0, 255, 0) : Scalar(0, 0, 255), 2);
+        
+        imshow("VISION_CPP", display_frame);
         waitKey(1);
 
         ros::spinOnce();
     }
+    
+    capture.stop();
+    ROS_INFO("Vision system shutdown");
     return 0;
 }
