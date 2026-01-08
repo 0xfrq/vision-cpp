@@ -441,8 +441,8 @@ int main(int argc, char** argv) {
             bs.ball_status = "FOUND";
             
             // Normalize coordinates to [-1, 1]
-            bc.pos_x = clamp(ball.center.x / frame.cols * 2 - 1, -1.0, 1.0);
-            bc.pos_y = clamp(ball.center.y / frame.rows * 2 - 1, -1.0, 1.0);
+            bc.pos_x = clamp((double)ball.center.x / frame.cols * 2 - 1, -1.0, 1.0);
+            bc.pos_y = clamp((double)ball.center.y / frame.rows * 2 - 1, -1.0, 1.0);
             bc.obj_size = ball.area;
             
             ba.ballarea = ball.area;
