@@ -264,218 +264,169 @@ int main(int argc,char**argv){
         }
         
         Mat display_frame = frame.clone();
+        bool detected = false;
+        Point2f det_center;
+        int det_area = 0;
+        Rect det_box;
 
-        /* ===== YOLO ===== */
-        if(state==NOTFOUND){
-
-            auto dets=yolo.infer(frame);
-            bool yolo_found = false;
-            
-            for(auto&d:dets){
-                // Lower confidence for faster detection (0.4 instead of 0.5)
-                if(d.class_id!=0 || d.conf<0.4f) continue;
-
-                Rect b=d.box;
-                Point2f nc(b.x+b.width/2.f,b.y+b.height/2.f);
-                int na=b.area();
-
-                // Direct assignment (no smoothing) - matching Python
-                center=nc;
-                smooth_center=nc;
-                ball_area=na;
-                smooth_area=na;
-                velocity=Point2f(0,0);
-                last_velocity=Point2f(0,0);
-                initialized=true;
-                last_box=b;
-
-                // Calculate scan area based on ball size (matching Python)
-                int in_area;
-                if(ball_area <= 5000){
-                    in_area = int(b.width * 3);
-                }else{
-                    in_area = b.width + 35;
-                }
-                scan_x={int(center.x-in_area),int(center.x+in_area)};
-
-                extractHSV(frame,b);
-                last_seen=ros::Time::now().toSec();
-                hsv_fail=0;
-                consecutive_found=0;
-                consecutive_lost=0;
-                yolo_skip_counter=0;
-                state=FOUND;
-                yolo_found=true;
-                
-                // Immediate publish on detection for fast response
-                v2_detection::BallState bs_immediate;
-                v2_detection::BallCoordinate bc_immediate;
-                v2_detection::Ballarea ba_immediate;
-                
-                bs_immediate.ball_status="FOUND";
-                bc_immediate.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                bc_immediate.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                bc_immediate.obj_size=ball_area;
-                ba_immediate.ballarea=ball_area;
-                
-                pub_state.publish(bs_immediate);
-                pub_coord.publish(bc_immediate);
-                pub_area.publish(ba_immediate);
-                
-                ROS_INFO("YOLO: Ball locked - Area:%d, Conf:%.2f", ball_area, d.conf);
-                break;
-            }
-            
-            if(!yolo_found) {
-                // Publish NOTFOUND only if really not detected
-                v2_detection::BallState bs_nf;
-                bs_nf.ball_status="NOTFOUND";
-                pub_state.publish(bs_nf);
-            }
+        /* ===== DUAL MODE: YOLO + HSV PARALLEL ===== */
+        
+        // ALWAYS run YOLO (it's fast!) for continuous detection
+        auto dets=yolo.infer(frame);
+        bool yolo_found = false;
+        Point2f yolo_center;
+        int yolo_area = 0;
+        Rect yolo_box;
+        float yolo_conf = 0;
+        
+        for(auto&d:dets){
+            if(d.class_id!=0 || d.conf<0.3f) continue;  // Very low threshold
+            yolo_box=d.box;
+            yolo_center=Point2f(yolo_box.x+yolo_box.width/2.f,yolo_box.y+yolo_box.height/2.f);
+            yolo_area=yolo_box.area();
+            yolo_conf=d.conf;
+            yolo_found=true;
+            break;
         }
 
-        /* ===== HSV TRACK ===== */
-        else{
-            // Skip field masking for speed when tracking is stable
-            Mat track_frame = (consecutive_found > 5) ? frame : extractField(frame);
-
-            Mat hsv,mask;
-            cvtColor(track_frame,hsv,COLOR_BGR2HSV);
+        // If tracking, try HSV first (faster than YOLO)
+        bool hsv_found = false;
+        Point2f hsv_center;
+        int hsv_area = 0;
+        Rect hsv_box;
+        
+        if(initialized && state==FOUND){
+            // FAST HSV tracking - NO field masking
+            Mat hsv;
+            cvtColor(frame,hsv,COLOR_BGR2HSV);
+            
+            Mat mask;
             inRange(hsv,Scalar(min_h,min_s,min_v),Scalar(max_h,max_s,max_v),mask);
 
-            Mat kernel = Mat::ones(5,5,CV_8U);
+            // Fast morphology
+            Mat kernel = Mat::ones(3,3,CV_8U);  // Smaller kernel = faster
             morphologyEx(mask,mask,MORPH_CLOSE,kernel);
-            morphologyEx(mask,mask,MORPH_OPEN ,kernel);
 
             vector<vector<Point>> contours;
             findContours(mask,contours,RETR_EXTERNAL,CHAIN_APPROX_SIMPLE);
 
-            bool found=false;
             double best_score = -1;
-            Point2f best_center;
-            int best_area = 0;
-            Rect best_box;
-
-            // Predict next position based on last velocity
-            Point2f predicted_center = center + last_velocity;
 
             for(auto&c:contours){
                 double a=contourArea(c);
-                // More lenient area filtering: 15% to 130%
-                if(a<ball_area*0.15||a>ball_area*1.3) continue;
-                if(a<2000) continue; // Lower minimum threshold
+                if(a<ball_area*0.2||a>ball_area*1.3) continue;  // Reasonable range
+                if(a<1800) continue;
 
                 Rect r=boundingRect(c);
-                int cx=r.x+r.width/2;
-                int cy=r.y+r.height/2;
+                Point2f nc(r.x+r.width/2.f,r.y+r.height/2.f);
                 
-                // Expanded scan area for fast balls
-                int expanded_scan = (scan_x[1]-scan_x[0])*1.5;
-                int scan_center = (scan_x[0]+scan_x[1])/2;
-                if(cx<scan_center-expanded_scan||cx>scan_center+expanded_scan) continue;
-
-                Point2f nc(cx,cy);
+                // Quick checks only
+                int scan_range = ball_area < 5000 ? 120 : 80;
+                if(abs(nc.x - center.x) > scan_range) continue;
                 
-                // Score based on distance to predicted position + area similarity
-                float dist = norm(nc - predicted_center);
-                float area_diff = abs(a - ball_area) / (float)ball_area;
-                float score = 1.0f / (1.0f + dist/100.0f + area_diff*2.0f);
+                // Simple scoring: distance + area
+                float dist = norm(nc - center);
+                float area_ratio = (float)a / ball_area;
+                float score = 1.0f / (1.0f + dist/60.0f + abs(area_ratio-1.0f)*3.0f);
                 
                 if(score > best_score) {
                     best_score = score;
-                    best_center = nc;
-                    best_area = int(a);
-                    best_box = r;
-                    found = true;
-                }
-            }
-
-            if(found){
-                // Calculate velocity for next frame prediction
-                last_velocity = best_center - center;
-                
-                // Direct assignment
-                center=best_center;
-                smooth_center=best_center;
-                ball_area=best_area;
-                smooth_area=best_area;
-                last_box=best_box;
-
-                last_seen=ros::Time::now().toSec();
-                hsv_fail=0;
-                consecutive_found++;
-                consecutive_lost=0;
-                
-                // Immediate publish during tracking
-                v2_detection::BallCoordinate bc_track;
-                v2_detection::BallState bs_track;
-                v2_detection::Ballarea ba_track;
-                
-                bc_track.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                bc_track.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                bc_track.obj_size=ball_area;
-                bs_track.ball_status="FOUND";
-                ba_track.ballarea=ball_area;
-                
-                pub_coord.publish(bc_track);
-                pub_state.publish(bs_track);
-                pub_area.publish(ba_track);
-                
-                // Print like Python
-                ROS_INFO_THROTTLE(0.1, "\nFOUND\nBall Area Result : %d\n", ball_area);
-            }else{
-                hsv_fail++;
-                consecutive_lost++;
-                consecutive_found=0;
-                
-                // Lock-in mechanism: don't lose tracking immediately
-                if(consecutive_lost > LOCK_OUT_THRESHOLD){
-                    state=NOTFOUND;
-                    initialized=false;
-                    last_velocity=Point2f(0,0);
-                    ROS_INFO("Track lost after %d frames - switching to YOLO", consecutive_lost);
-                } else {
-                    // Try prediction during temporary loss
-                    center = center + last_velocity;
-                    center.x = clamp(center.x, 0.f, (float)frame.cols-1);
-                    center.y = clamp(center.y, 0.f, (float)frame.rows-1);
-                    
-                    // Still publish during prediction
-                    v2_detection::BallCoordinate bc_pred;
-                    bc_pred.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                    bc_pred.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                    bc_pred.obj_size=ball_area;
-                    pub_coord.publish(bc_pred);
+                    hsv_center = nc;
+                    hsv_area = (int)a;
+                    hsv_box = r;
+                    hsv_found = (score > 0.4);  // Minimum threshold
                 }
             }
         }
 
-        /* ===== ROS OUTPUT & DISPLAY ===== */
+        /* ===== DECISION LOGIC ===== */
+        if(hsv_found && state==FOUND) {
+            // HSV tracking successful - use it
+            detected = true;
+            det_center = hsv_center;
+            det_area = hsv_area;
+            det_box = hsv_box;
+            consecutive_found++;
+            consecutive_lost=0;
+            
+            // Update tracking
+            center=det_center;
+            ball_area=det_area;
+            last_box=det_box;
+            
+            ROS_INFO_THROTTLE(0.3, "HSV Track: Area=%d", det_area);
+            
+        } else if(yolo_found) {
+            // YOLO found ball - use it (either lost HSV or new detection)
+            detected = true;
+            det_center = yolo_center;
+            det_area = yolo_area;
+            det_box = yolo_box;
+            
+            // Update tracking state
+            center=det_center;
+            ball_area=det_area;
+            last_box=det_box;
+            initialized=true;
+            
+            // Re-extract HSV for new ball
+            extractHSV(frame,det_box);
+            
+            consecutive_found++;
+            consecutive_lost=0;
+            state=FOUND;
+            
+            ROS_INFO("YOLO Lock: Area=%d Conf=%.2f", det_area, yolo_conf);
+            
+        } else {
+            // Nothing found
+            consecutive_lost++;
+            consecutive_found=0;
+            
+            if(consecutive_lost > 8) {  // Quick timeout
+                state=NOTFOUND;
+                initialized=false;
+            }
+        }
+
+        /* ===== PUBLISH ===== */
         v2_detection::BallState bs;
         v2_detection::BallCoordinate bc;
         v2_detection::Ballarea ba;
-
-        if(state==FOUND){
+        
+        if(detected) {
             bs.ball_status="FOUND";
-            bc.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-            bc.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-            bc.obj_size=ball_area;
-            ba.ballarea=ball_area;
+            bc.pos_x=clamp(det_center.x/frame.cols*2-1,-1.f,1.f);
+            bc.pos_y=clamp(det_center.y/frame.rows*2-1,-1.f,1.f);
+            bc.obj_size=det_area;
+            ba.ballarea=det_area;
+            
+            pub_state.publish(bs);
             pub_coord.publish(bc);
             pub_area.publish(ba);
-            pub_state.publish(bs);
-            
-            rectangle(display_frame,last_box,Scalar(0,255,255),2);
-            circle(display_frame, Point(int(center.x), int(center.y)), 5, Scalar(0,0,255), -1);
-            
-            // Velocity vector visualization
-            if(norm(last_velocity) > 1.0) {
-                Point2f vel_end = center + last_velocity*3.0f;
-                arrowedLine(display_frame, Point(center), Point(vel_end), 
-                           Scalar(255,0,255), 2);
-            }
-        }else{
-            bs.ball_status="NOTFOUND";
+        
+        /* ===== VISUALIZATION ===== */
+        if(detected) {
+            rectangle(display_frame, det_box, Scalar(0,255,0), 2);
+            circle(display_frame, Point(det_center), 4, Scalar(0,0,255), -1);
+        }
+
+        calculate_fps();
+        char fps_text[64];
+        snprintf(fps_text, sizeof(fps_text), "FPS:%.1f | State:%s", 
+                 fps, state==NOTFOUND ? "SEARCH" : "TRACK");
+        putText(display_frame, fps_text, Point(5, 15),
+                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+
+        imshow("VISION_CPP", display_frame);
+        waitKey(1);
+
+        ros::spinOnce();
+    }
+    
+    capture.stop();
+    return 0;
+}
             pub_state.publish(bs);
         }
         
