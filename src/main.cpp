@@ -404,6 +404,10 @@ int main(int argc,char**argv){
             pub_state.publish(bs);
             pub_coord.publish(bc);
             pub_area.publish(ba);
+        } else {
+            bs.ball_status="NOTFOUND";
+            pub_state.publish(bs);
+        }
         
         /* ===== VISUALIZATION ===== */
         if(detected) {
@@ -425,34 +429,5 @@ int main(int argc,char**argv){
     }
     
     capture.stop();
-    return 0;
-}
-            pub_state.publish(bs);
-        }
-        
-        // Calculate and display FPS
-        calculate_fps();
-        
-        // Draw FPS and status on display
-        char fps_text[50];
-        snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", fps);
-        putText(display_frame, fps_text, Point(5, 15), 
-                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
-        
-        char status_text[50];
-        snprintf(status_text, sizeof(status_text), "%s", 
-                 state==FOUND ? "TRACKING" : "SEARCHING");
-        putText(display_frame, status_text, Point(5, 35), 
-                FONT_HERSHEY_SIMPLEX, 0.5, 
-                state==FOUND ? Scalar(0, 255, 0) : Scalar(0, 0, 255), 2);
-        
-        imshow("VISION_CPP", display_frame);
-        waitKey(1);
-
-        ros::spinOnce();
-    }
-    
-    capture.stop();
-    ROS_INFO("Vision system shutdown");
     return 0;
 }
