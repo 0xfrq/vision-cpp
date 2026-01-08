@@ -106,6 +106,43 @@ void extractHSV(const Mat& img, const Rect& b) {
 }
 
 /* =========================
+   FIELD MASKING
+   ========================= */
+Mat extractField(const Mat& img) {
+    // Green field detection (adjust HSV values as needed)
+    Mat hsv, mask, result;
+    cvtColor(img, hsv, COLOR_BGR2HSV);
+    
+    // Green field HSV range - adjust these values for your field
+    Scalar lower(35, 40, 40);
+    Scalar upper(85, 255, 255);
+    
+    inRange(hsv, lower, upper, mask);
+    
+    Mat kernel = getStructuringElement(MORPH_RECT, Size(5,5));
+    erode(mask, mask, kernel, Point(-1,-1), 2);
+    dilate(mask, mask, kernel, Point(-1,-1), 5);
+    
+    // Find largest contour (field)
+    vector<vector<Point>> contours;
+    findContours(mask, contours, RETR_TREE, CHAIN_APPROX_NONE);
+    
+    Mat fieldMask = Mat::zeros(img.size(), CV_8UC1);
+    if(!contours.empty()){
+        auto maxContour = *max_element(contours.begin(), contours.end(),
+            [](const vector<Point>&a, const vector<Point>&b){
+                return contourArea(a) < contourArea(b);
+            });
+        vector<Point> hull;
+        convexHull(maxContour, hull);
+        fillConvexPoly(fieldMask, hull, Scalar(255));
+    }
+    
+    bitwise_and(img, img, result, fieldMask);
+    return result;
+}
+
+/* =========================
    MAIN
    ========================= */
 int main(int argc,char**argv){
