@@ -242,7 +242,7 @@ int main(int argc,char**argv){
     ThreadedCapture capture(0);
     
     fps_start_time = ros::Time::now().toSec();
-    last_seen=ros::Time::now().toSec();
+    last_seen_time = ros::Time::now().toSec();
     
     ROS_INFO("Vision system ready - starting main loop");
 
