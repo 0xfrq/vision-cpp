@@ -56,11 +56,11 @@ vector<int> scan_x(2,0);
 double last_seen = 0.0;
 int hsv_fail = 0;
 
-/* Params - Optimized for fast ball tracking */
-constexpr int HSV_FAIL_MAX = 6;
-constexpr float POS_ALPHA = 0.5f;      // Increased from 0.35 for faster response
-constexpr float AREA_ALPHA = 0.3f;     // Increased from 0.25 for faster adaptation
-constexpr float VEL_ALPHA = 0.6f;      // Increased from 0.4 for better prediction
+/* Params - Matching Python's direct tracking behavior */
+constexpr int HSV_FAIL_MAX = 10;        // Increased tolerance
+constexpr float POS_ALPHA = 0.0f;       // Direct position (no smoothing like Python)
+constexpr float AREA_ALPHA = 0.0f;      // Direct area (no smoothing like Python)  
+constexpr float VEL_ALPHA = 0.0f;       // No velocity prediction (match Python)
 
 /* FPS Tracking */
 int frame_counter = 0;
@@ -269,21 +269,13 @@ int main(int argc,char**argv){
                 Point2f nc(b.x+b.width/2.f,b.y+b.height/2.f);
                 int na=b.area();
 
-                if(!initialized){
-                    smooth_center=nc;
-                    velocity=Point2f(0,0);
-                    smooth_area=na;
-                    initialized=true;
-                    ROS_INFO("Ball detected - initializing tracker at (%.1f, %.1f)", nc.x, nc.y);
-                }else{
-                    Point2f delta=nc-smooth_center;
-                    velocity=(1-VEL_ALPHA)*velocity + VEL_ALPHA*delta;
-                    smooth_center+=velocity;
-                    smooth_area=int(AREA_ALPHA*na+(1-AREA_ALPHA)*smooth_area);
-                }
-
-                center=smooth_center;
-                ball_area=smooth_area;
+                // Direct assignment (no smoothing) - matching Python
+                center=nc;
+                smooth_center=nc;
+                ball_area=na;
+                smooth_area=na;
+                velocity=Point2f(0,0);
+                initialized=true;
                 last_box=b;
 
                 // Calculate scan area based on ball size (matching Python)
@@ -340,8 +332,8 @@ int main(int argc,char**argv){
 
             for(auto&c:contours){
                 double a=contourArea(c);
-                // Area filtering: 20% to 110% of previous area
-                if(a<ball_area*0.2||a>ball_area*1.1) continue;
+                // Area filtering: 20% to 120% (more lenient than before)
+                if(a<ball_area*0.2||a>ball_area*1.2) continue;
 
                 Rect r=boundingRect(c);
                 int cx=r.x+r.width/2;
@@ -350,36 +342,26 @@ int main(int argc,char**argv){
                 // Minimum area threshold (3000 for non-fisheye)
                 if(a<3000) continue;
 
+                // Direct assignment matching Python (no velocity prediction)
                 Point2f nc(cx,r.y+r.height/2);
-                Point2f delta=nc-smooth_center;
-                velocity=(1-VEL_ALPHA)*velocity+VEL_ALPHA*delta;
-                smooth_center+=velocity;
-
-                smooth_area=int(AREA_ALPHA*a+(1-AREA_ALPHA)*smooth_area);
-
-                center=smooth_center;
-                ball_area=smooth_area;
+                center=nc;
+                smooth_center=nc;
+                ball_area=int(a);
+                smooth_area=int(a);
                 last_box=r;
 
-                // Dynamic timeout based on ball area
-                double timeout=map_value(ball_area,0,76800,0.5,80);
-                double now=ros::Time::now().toSec();
-
-                if(now-last_seen<=timeout){
-                    last_seen=now;
-                    found=true;
-                    
-                    // Immediate publish during tracking for responsiveness
-                    v2_detection::BallCoordinate bc_track;
-                    bc_track.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                    bc_track.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                    bc_track.obj_size=ball_area;
-                    pub_coord.publish(bc_track);
-                }else{
-                    state=NOTFOUND;
-                    initialized=false;
-                    ROS_INFO_THROTTLE(2.0, "Track timeout - switching to YOLO search");
-                }
+                last_seen=ros::Time::now().toSec();
+                found=true;
+                
+                // Immediate publish during tracking
+                v2_detection::BallCoordinate bc_track;
+                bc_track.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
+                bc_track.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
+                bc_track.obj_size=ball_area;
+                pub_coord.publish(bc_track);
+                
+                // Print like Python
+                ROS_INFO_THROTTLE(0.1, "Ball Area Result : %d", ball_area);
                 break;
             }
 
@@ -410,11 +392,11 @@ int main(int argc,char**argv){
             // Draw center point
             circle(display_frame, Point(int(center.x), int(center.y)), 5, Scalar(0,0,255), -1);
             
-            // Debug output (matching Python) - throttled to reduce overhead
-            ROS_INFO_THROTTLE(1.0, "Ball Area: %d, Center: (%.1f, %.1f), FPS: %.1f", 
-                             ball_area, center.x, center.y, fps);
+            // Print status like Python - every frame when tracking
+            ROS_INFO_THROTTLE(0.1, "\n%s", state==FOUND ? "FOUND" : "NOTFOUND");
         }else{
             bs.ball_status="NOTFOUND";
+            ROS_INFO_THROTTLE(1.0, "\n%s", "NOTFOUND");
         }
 
         pub_state.publish(bs);
