@@ -52,22 +52,13 @@ int smooth_area = 0;
 Rect last_box;
 vector<int> scan_x(2,0);
 
-/* Timing */
-double last_seen = 0.0;
-int hsv_fail = 0;
-int yolo_skip_counter = 0;  // Skip YOLO frames when tracking
-Point2f last_velocity(0,0);  // For prediction
-int consecutive_found = 0;   // Lock-in counter
-int consecutive_lost = 0;    // Loss counter
+/* Timing - matching Python */
+double last_seen_time = 0.0;
+double timeout_duration = 0.0;
 
-/* Params - Matching Python's direct tracking behavior */
-constexpr int HSV_FAIL_MAX = 10;        // Increased tolerance
-constexpr float POS_ALPHA = 0.0f;       // Direct position (no smoothing like Python)
-constexpr float AREA_ALPHA = 0.0f;      // Direct area (no smoothing like Python)  
-constexpr float VEL_ALPHA = 0.0f;       // No velocity prediction (match Python)
-constexpr int YOLO_SKIP_FRAMES = 3;     // Skip YOLO when tracking well
-constexpr int LOCK_IN_THRESHOLD = 3;    // Frames needed to lock tracking
-constexpr int LOCK_OUT_THRESHOLD = 15;  // Frames needed to lose tracking
+/* Params - exact Python behavior */
+constexpr double FISHEYE = 1.0;  // Set to 0.34 if using fisheye lens
+constexpr int MIN_AREA_THRESHOLD = (int)(3000 * FISHEYE);
 
 /* FPS Tracking */
 int frame_counter = 0;
@@ -267,80 +258,87 @@ int main(int argc,char**argv){
 
         /* ===== YOLO ===== */
         if(state==NOTFOUND){
-
             auto dets=yolo.infer(frame);
-            bool yolo_found = false;
             
             for(auto&d:dets){
-                // Lower confidence for faster detection (0.4 instead of 0.5)
-                if(d.class_id!=0 || d.conf<0.4f) continue;
+                if(d.class_id!=0 || d.conf<0.5f) continue;
 
                 Rect b=d.box;
                 Point2f nc(b.x+b.width/2.f,b.y+b.height/2.f);
                 int na=b.area();
 
-                // Direct assignment (no smoothing) - matching Python
+                // Direct assignment - exact Python
                 center=nc;
                 smooth_center=nc;
                 ball_area=na;
                 smooth_area=na;
-                velocity=Point2f(0,0);
-                last_velocity=Point2f(0,0);
                 initialized=true;
                 last_box=b;
 
-                // Calculate scan area based on ball size (matching Python)
-                int in_area;
-                if(ball_area <= 5000){
-                    in_area = int(b.width * 3);
-                }else{
-                    in_area = b.width + 35;
-                }
-                scan_x={int(center.x-in_area),int(center.x+in_area)};
-
+                // Extract HSV from 7 sample points (matching Python)
                 extractHSV(frame,b);
-                last_seen=ros::Time::now().toSec();
-                hsv_fail=0;
-                consecutive_found=0;
-                consecutive_lost=0;
-                yolo_skip_counter=0;
+                
+                // Calculate timeout based on ball area (matching Python)
+                timeout_duration = map_value(ball_area, 0, 76800, 0.5, 80);
+                last_seen_time = ros::Time::now().toSec();
+                
+                // Calculate scan area (matching Python logic)
+                int in_area_ball;
+                if(ball_area <= (int)(5000*FISHEYE)) {
+                    in_area_ball = b.width * 3;
+                } else {
+                    in_area_ball = b.width + (int)(35*FISHEYE);
+                }
+                scan_x[0] = center.x - in_area_ball;
+                scan_x[1] = center.x + in_area_ball;
+                
+                // Adaptive YOLO input size (matching Python blobsize)
+                if(ball_area <= (int)(2800*FISHEYE)){
+                    yolo.setInputSize(320, 320);
+                } else {
+                    yolo.setInputSize(224, 224);
+                }
+                
                 state=FOUND;
-                yolo_found=true;
                 
-                // Immediate publish on detection for fast response
-                v2_detection::BallState bs_immediate;
-                v2_detection::BallCoordinate bc_immediate;
-                v2_detection::Ballarea ba_immediate;
+                // Publish immediately
+                v2_detection::BallState bs;
+                v2_detection::BallCoordinate bc;
+                v2_detection::Ballarea ba;
                 
-                bs_immediate.ball_status="FOUND";
-                bc_immediate.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                bc_immediate.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                bc_immediate.obj_size=ball_area;
-                ba_immediate.ballarea=ball_area;
+                bs.ball_status="FOUND";
+                bc.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
+                bc.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
+                bc.obj_size=ball_area;
+                ba.ballarea=ball_area;
                 
-                pub_state.publish(bs_immediate);
-                pub_coord.publish(bc_immediate);
-                pub_area.publish(ba_immediate);
+                pub_state.publish(bs);
+                pub_coord.publish(bc);
+                pub_area.publish(ba);
                 
-                ROS_INFO("YOLO: Ball locked - Area:%d, Conf:%.2f", ball_area, d.conf);
+                ROS_INFO("bola [%.0f%%] - blobsize: %dx%d", d.conf*100, 
+                         ball_area <= (int)(2800*FISHEYE) ? 320 : 224,
+                         ball_area <= (int)(2800*FISHEYE) ? 320 : 224);
                 break;
             }
             
-            if(!yolo_found) {
-                // Publish NOTFOUND only if really not detected
-                v2_detection::BallState bs_nf;
-                bs_nf.ball_status="NOTFOUND";
-                pub_state.publish(bs_nf);
+            // No detection - reset to default blobsize (matching Python)
+            if(state == NOTFOUND){
+                yolo.setInputSize(416, 416);
+                
+                v2_detection::BallState bs;
+                bs.ball_status="NOTFOUND";
+                pub_state.publish(bs);
             }
         }
 
         /* ===== HSV TRACK ===== */
         else{
-            // Skip field masking for speed when tracking is stable
-            Mat track_frame = (consecutive_found > 5) ? frame : extractField(frame);
+            // Field masking (matching Python)
+            Mat field_frame = extractField(frame);
 
             Mat hsv,mask;
-            cvtColor(track_frame,hsv,COLOR_BGR2HSV);
+            cvtColor(field_frame,hsv,COLOR_BGR2HSV);
             inRange(hsv,Scalar(min_h,min_s,min_v),Scalar(max_h,max_s,max_v),mask);
 
             Mat kernel = Mat::ones(5,5,CV_8U);
@@ -351,149 +349,84 @@ int main(int argc,char**argv){
             findContours(mask,contours,RETR_EXTERNAL,CHAIN_APPROX_SIMPLE);
 
             bool found=false;
-            double best_score = -1;
-            Point2f best_center;
-            int best_area = 0;
-            Rect best_box;
-
-            // Predict next position based on last velocity
-            Point2f predicted_center = center + last_velocity;
 
             for(auto&c:contours){
                 double a=contourArea(c);
-                // More lenient area filtering: 15% to 130%
-                if(a<ball_area*0.15||a>ball_area*1.3) continue;
-                if(a<2000) continue; // Lower minimum threshold
+                
+                // Area filtering: 20% to 110% (matching Python)
+                if(a < ball_area/5.0 || a > ball_area*1.1) continue;
+                if((int)a < MIN_AREA_THRESHOLD) continue;
 
                 Rect r=boundingRect(c);
                 int cx=r.x+r.width/2;
-                int cy=r.y+r.height/2;
                 
-                // Expanded scan area for fast balls
-                int expanded_scan = (scan_x[1]-scan_x[0])*1.5;
-                int scan_center = (scan_x[0]+scan_x[1])/2;
-                if(cx<scan_center-expanded_scan||cx>scan_center+expanded_scan) continue;
+                // Scan area check (matching Python)
+                if(cx < scan_x[0] || cx > scan_x[1]) continue;
 
-                Point2f nc(cx,cy);
+                // Direct assignment (matching Python)
+                Point2f nc(cx, r.y+r.height/2.f);
+                center=nc;
+                smooth_center=nc;
+                ball_area=(int)a;
+                smooth_area=(int)a;
+                last_box=r;
+
+                found=true;
                 
-                // Score based on distance to predicted position + area similarity
-                float dist = norm(nc - predicted_center);
-                float area_diff = abs(a - ball_area) / (float)ball_area;
-                float score = 1.0f / (1.0f + dist/100.0f + area_diff*2.0f);
+                // Publish immediately
+                v2_detection::BallCoordinate bc;
+                v2_detection::BallState bs;
+                v2_detection::Ballarea ba;
                 
-                if(score > best_score) {
-                    best_score = score;
-                    best_center = nc;
-                    best_area = int(a);
-                    best_box = r;
-                    found = true;
-                }
+                bc.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
+                bc.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
+                bc.obj_size=ball_area;
+                bs.ball_status="FOUND";
+                ba.ballarea=ball_area;
+                
+                pub_coord.publish(bc);
+                pub_state.publish(bs);
+                pub_area.publish(ba);
+                
+                ROS_INFO("Ball Area Result : %d", ball_area);
+                break;
             }
 
+            // Timeout check (matching Python)
             if(found){
-                // Calculate velocity for next frame prediction
-                last_velocity = best_center - center;
-                
-                // Direct assignment
-                center=best_center;
-                smooth_center=best_center;
-                ball_area=best_area;
-                smooth_area=best_area;
-                last_box=best_box;
-
-                last_seen=ros::Time::now().toSec();
-                hsv_fail=0;
-                consecutive_found++;
-                consecutive_lost=0;
-                
-                // Immediate publish during tracking
-                v2_detection::BallCoordinate bc_track;
-                v2_detection::BallState bs_track;
-                v2_detection::Ballarea ba_track;
-                
-                bc_track.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                bc_track.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                bc_track.obj_size=ball_area;
-                bs_track.ball_status="FOUND";
-                ba_track.ballarea=ball_area;
-                
-                pub_coord.publish(bc_track);
-                pub_state.publish(bs_track);
-                pub_area.publish(ba_track);
-                
-                // Print like Python
-                ROS_INFO_THROTTLE(0.1, "\nFOUND\nBall Area Result : %d\n", ball_area);
-            }else{
-                hsv_fail++;
-                consecutive_lost++;
-                consecutive_found=0;
-                
-                // Lock-in mechanism: don't lose tracking immediately
-                if(consecutive_lost > LOCK_OUT_THRESHOLD){
+                last_seen_time = ros::Time::now().toSec();
+            } else {
+                double current_time = ros::Time::now().toSec();
+                double delta = current_time - last_seen_time;
+                if(delta >= timeout_duration){
                     state=NOTFOUND;
                     initialized=false;
-                    last_velocity=Point2f(0,0);
-                    ROS_INFO("Track lost after %d frames - switching to YOLO", consecutive_lost);
-                } else {
-                    // Try prediction during temporary loss
-                    center = center + last_velocity;
-                    center.x = clamp(center.x, 0.f, (float)frame.cols-1);
-                    center.y = clamp(center.y, 0.f, (float)frame.rows-1);
-                    
-                    // Still publish during prediction
-                    v2_detection::BallCoordinate bc_pred;
-                    bc_pred.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                    bc_pred.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                    bc_pred.obj_size=ball_area;
-                    pub_coord.publish(bc_pred);
+                    ROS_INFO("Timeout after %.2fs - switching to YOLO", delta);
                 }
             }
         }
 
-        /* ===== ROS OUTPUT & DISPLAY ===== */
-        v2_detection::BallState bs;
-        v2_detection::BallCoordinate bc;
-        v2_detection::Ballarea ba;
-
+        /* ===== DISPLAY ===== */
         if(state==FOUND){
-            bs.ball_status="FOUND";
-            bc.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-            bc.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-            bc.obj_size=ball_area;
-            ba.ballarea=ball_area;
-            pub_coord.publish(bc);
-            pub_area.publish(ba);
-            pub_state.publish(bs);
-            
             rectangle(display_frame,last_box,Scalar(0,255,255),2);
             circle(display_frame, Point(int(center.x), int(center.y)), 5, Scalar(0,0,255), -1);
             
-            // Velocity vector visualization
-            if(norm(last_velocity) > 1.0) {
-                Point2f vel_end = center + last_velocity*3.0f;
-                arrowedLine(display_frame, Point(center), Point(vel_end), 
-                           Scalar(255,0,255), 2);
-            }
-        }else{
-            bs.ball_status="NOTFOUND";
-            pub_state.publish(bs);
+            // Draw scan area (yellow vertical lines)
+            line(display_frame, Point(scan_x[0],0), Point(scan_x[0],display_frame.rows), 
+                 Scalar(0,255,255), 1);
+            line(display_frame, Point(scan_x[1],0), Point(scan_x[1],display_frame.rows), 
+                 Scalar(0,255,255), 1);
         }
         
         // Calculate and display FPS
         calculate_fps();
         
-        // Draw FPS and status on display
-        char fps_text[50];
-        snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", fps);
+        // Draw FPS and status on display (matching Python)
+        char fps_text[64];
+        snprintf(fps_text, sizeof(fps_text), "FPS: %.1f | %s", fps, 
+                 state==FOUND ? "FOUND" : "NOTFOUND");
         putText(display_frame, fps_text, Point(5, 15), 
                 FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
-        
-        char status_text[50];
-        snprintf(status_text, sizeof(status_text), "%s", 
-                 state==FOUND ? "TRACKING" : "SEARCHING");
-        putText(display_frame, status_text, Point(5, 35), 
-                FONT_HERSHEY_SIMPLEX, 0.5, 
-                state==FOUND ? Scalar(0, 255, 0) : Scalar(0, 0, 255), 2);
         
         imshow("VISION_CPP", display_frame);
         waitKey(1);
