@@ -61,13 +61,13 @@ int consecutive_found = 0;   // Lock-in counter
 int consecutive_lost = 0;    // Loss counter
 
 /* Params - Matching Python's direct tracking behavior */
-constexpr int HSV_FAIL_MAX = 10;        // Increased tolerance
+constexpr int HSV_FAIL_MAX = 15;        // Increased tolerance
 constexpr float POS_ALPHA = 0.0f;       // Direct position (no smoothing like Python)
 constexpr float AREA_ALPHA = 0.0f;      // Direct area (no smoothing like Python)  
 constexpr float VEL_ALPHA = 0.0f;       // No velocity prediction (match Python)
-constexpr int YOLO_SKIP_FRAMES = 3;     // Skip YOLO when tracking well
-constexpr int LOCK_IN_THRESHOLD = 3;    // Frames needed to lock tracking
-constexpr int LOCK_OUT_THRESHOLD = 35;  // Increased: Frames needed to lose tracking (was 15)
+constexpr int YOLO_SKIP_FRAMES = 2;     // Skip YOLO when tracking well
+constexpr int LOCK_IN_THRESHOLD = 2;    // Frames needed to lock tracking
+constexpr int LOCK_OUT_THRESHOLD =34;  // Frames needed to lose tracking
 
 /* FPS Tracking */
 int frame_counter = 0;
@@ -289,12 +289,12 @@ int main(int argc,char**argv){
                 initialized=true;
                 last_box=b;
 
-                // Calculate scan area based on ball size (wider for stability)
+                // Calculate scan area based on ball size (matching Python)
                 int in_area;
                 if(ball_area <= 5000){
-                    in_area = int(b.width * 4);  // Wider scan for small balls
+                    in_area = int(b.width * 3);
                 }else{
-                    in_area = b.width + 50;      // Wider scan for large balls
+                    in_area = b.width + 35;
                 }
                 scan_x={int(center.x-in_area),int(center.x+in_area)};
 
@@ -336,26 +336,12 @@ int main(int argc,char**argv){
 
         /* ===== HSV TRACK ===== */
         else{
-            // Adaptive HSV tracking with expansion when consecutive losses occur
+            // Skip field masking for speed when tracking is stable
             Mat track_frame = (consecutive_found > 5) ? frame : extractField(frame);
 
             Mat hsv,mask;
             cvtColor(track_frame,hsv,COLOR_BGR2HSV);
-            
-            // Expand HSV range when losing track to improve recovery
-            int h_expand = min(consecutive_lost * 2, 10);  // Up to 10 units
-            int s_expand = min(consecutive_lost * 5, 30);  // Up to 30 units
-            int v_expand = min(consecutive_lost * 5, 40);  // Up to 40 units
-            
-            int adaptive_min_h = max(0, min_h - h_expand);
-            int adaptive_max_h = min(180, max_h + h_expand);
-            int adaptive_min_s = max(0, min_s - s_expand);
-            int adaptive_max_s = min(255, max_s + s_expand);
-            int adaptive_min_v = max(0, min_v - v_expand);
-            int adaptive_max_v = min(255, max_v + v_expand);
-            
-            inRange(hsv,Scalar(adaptive_min_h,adaptive_min_s,adaptive_min_v),
-                       Scalar(adaptive_max_h,adaptive_max_s,adaptive_max_v),mask);
+            inRange(hsv,Scalar(min_h,min_s,min_v),Scalar(max_h,max_s,max_v),mask);
 
             Mat kernel = Mat::ones(5,5,CV_8U);
             morphologyEx(mask,mask,MORPH_CLOSE,kernel);
@@ -375,16 +361,16 @@ int main(int argc,char**argv){
 
             for(auto&c:contours){
                 double a=contourArea(c);
-                // Very lenient area filtering: 12% to 150%
-                if(a<ball_area*0.12||a>ball_area*1.5) continue;
-                if(a<1500) continue; // Even lower minimum threshold
+                // More lenient area filtering: 15% to 130%
+                if(a<ball_area*0.15||a>ball_area*1.3) continue;
+                if(a<2000) continue; // Lower minimum threshold
 
                 Rect r=boundingRect(c);
                 int cx=r.x+r.width/2;
                 int cy=r.y+r.height/2;
                 
-                // Much wider scan area for fast balls and occlusions
-                int expanded_scan = (scan_x[1]-scan_x[0])*2.0;  // 2x wider
+                // Expanded scan area for fast balls
+                int expanded_scan = (scan_x[1]-scan_x[0])*1.5;
                 int scan_center = (scan_x[0]+scan_x[1])/2;
                 if(cx<scan_center-expanded_scan||cx>scan_center+expanded_scan) continue;
 
@@ -415,15 +401,6 @@ int main(int argc,char**argv){
                 smooth_area=best_area;
                 last_box=best_box;
 
-                // Update scan area dynamically
-                int in_area;
-                if(ball_area <= 5000){
-                    in_area = int(best_box.width * 4);
-                }else{
-                    in_area = best_box.width + 50;
-                }
-                scan_x={int(center.x-in_area),int(center.x+in_area)};
-                
                 last_seen=ros::Time::now().toSec();
                 hsv_fail=0;
                 consecutive_found++;
