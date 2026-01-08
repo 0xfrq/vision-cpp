@@ -292,13 +292,6 @@ int main(int argc,char**argv){
                 scan_x[0] = center.x - in_area_ball;
                 scan_x[1] = center.x + in_area_ball;
                 
-                // Adaptive YOLO input size (matching Python blobsize)
-                if(ball_area <= (int)(2800*FISHEYE)){
-                    yolo.setInputSize(320, 320);
-                } else {
-                    yolo.setInputSize(224, 224);
-                }
-                
                 state=FOUND;
                 
                 // Publish immediately
@@ -316,19 +309,8 @@ int main(int argc,char**argv){
                 pub_coord.publish(bc);
                 pub_area.publish(ba);
                 
-                ROS_INFO("bola [%.0f%%] - blobsize: %dx%d", d.conf*100, 
-                         ball_area <= (int)(2800*FISHEYE) ? 320 : 224,
-                         ball_area <= (int)(2800*FISHEYE) ? 320 : 224);
+                ROS_INFO("bola [%.0f%%]", d.conf*100);
                 break;
-            }
-            
-            // No detection - reset to default blobsize (matching Python)
-            if(state == NOTFOUND){
-                yolo.setInputSize(416, 416);
-                
-                v2_detection::BallState bs;
-                bs.ball_status="NOTFOUND";
-                pub_state.publish(bs);
             }
         }
 

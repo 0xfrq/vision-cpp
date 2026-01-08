@@ -126,8 +126,3 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
     
     return detections;
 }
-
-void YoloONNX::setInputSize(int width, int height) {
-    input_width = width;
-    input_height = height;
-}
