@@ -52,13 +52,17 @@ int smooth_area = 0;
 Rect last_box;
 vector<int> scan_x(2,0);
 
-/* Timing - matching Python */
+/* Timing */
 double last_seen_time = 0.0;
 double timeout_duration = 0.0;
+Point2f last_velocity(0,0);  // Motion prediction
+int consecutive_found = 0;   // Lock-in counter
+int consecutive_lost = 0;    // Loss counter
 
-/* Params - exact Python behavior */
-constexpr double FISHEYE = 1.0;  // Set to 0.34 if using fisheye lens
+/* Params */
+constexpr double FISHEYE = 1.0;
 constexpr int MIN_AREA_THRESHOLD = (int)(3000 * FISHEYE);
+constexpr int LOCK_OUT_THRESHOLD = 12;  // Frames before losing track
 
 /* FPS Tracking */
 int frame_counter = 0;
@@ -261,19 +265,23 @@ int main(int argc,char**argv){
             auto dets=yolo.infer(frame);
             
             for(auto&d:dets){
-                if(d.class_id!=0 || d.conf<0.5f) continue;
+                // Lower confidence for faster detection
+                if(d.class_id!=0 || d.conf<0.4f) continue;
 
                 Rect b=d.box;
                 Point2f nc(b.x+b.width/2.f,b.y+b.height/2.f);
                 int na=b.area();
 
-                // Direct assignment - exact Python
+                // Direct assignment
                 center=nc;
                 smooth_center=nc;
                 ball_area=na;
                 smooth_area=na;
                 initialized=true;
                 last_box=b;
+                last_velocity=Point2f(0,0);
+                consecutive_found=0;
+                consecutive_lost=0;
 
                 // Extract HSV from 7 sample points (matching Python)
                 extractHSV(frame,b);
@@ -316,11 +324,11 @@ int main(int argc,char**argv){
 
         /* ===== HSV TRACK ===== */
         else{
-            // Field masking (matching Python)
-            Mat field_frame = extractField(frame);
+            // Field masking only when needed (skip when confident)
+            Mat track_frame = (consecutive_found > 5) ? frame : extractField(frame);
 
             Mat hsv,mask;
-            cvtColor(field_frame,hsv,COLOR_BGR2HSV);
+            cvtColor(track_frame,hsv,COLOR_BGR2HSV);
             inRange(hsv,Scalar(min_h,min_s,min_v),Scalar(max_h,max_s,max_v),mask);
 
             Mat kernel = Mat::ones(5,5,CV_8U);
@@ -331,31 +339,62 @@ int main(int argc,char**argv){
             findContours(mask,contours,RETR_EXTERNAL,CHAIN_APPROX_SIMPLE);
 
             bool found=false;
+            double best_score = -1;
+            Point2f best_center;
+            int best_area = 0;
+            Rect best_box;
+
+            // Predict next position
+            Point2f predicted_center = center + last_velocity;
 
             for(auto&c:contours){
                 double a=contourArea(c);
                 
-                // Area filtering: 20% to 110% (matching Python)
-                if(a < ball_area/5.0 || a > ball_area*1.1) continue;
+                // Lenient area filtering: 15% to 130%
+                if(a < ball_area*0.15 || a > ball_area*1.3) continue;
                 if((int)a < MIN_AREA_THRESHOLD) continue;
 
                 Rect r=boundingRect(c);
                 int cx=r.x+r.width/2;
+                int cy=r.y+r.height/2;
                 
-                // Scan area check (matching Python)
-                if(cx < scan_x[0] || cx > scan_x[1]) continue;
+                // Expanded scan area
+                int expanded_scan = (scan_x[1]-scan_x[0])*1.5;
+                int scan_center = (scan_x[0]+scan_x[1])/2;
+                if(cx < scan_center-expanded_scan || cx > scan_center+expanded_scan) continue;
 
-                // Direct assignment (matching Python)
-                Point2f nc(cx, r.y+r.height/2.f);
-                center=nc;
-                smooth_center=nc;
-                ball_area=(int)a;
-                smooth_area=(int)a;
-                last_box=r;
-
-                found=true;
+                Point2f nc(cx,cy);
                 
-                // Publish immediately
+                // Score: distance to prediction + area similarity
+                float dist = norm(nc - predicted_center);
+                float area_diff = abs(a - ball_area) / (float)ball_area;
+                float score = 1.0f / (1.0f + dist/100.0f + area_diff*2.0f);
+                
+                if(score > best_score) {
+                    best_score = score;
+                    best_center = nc;
+                    best_area = (int)a;
+                    best_box = r;
+                    found = true;
+                }
+            }
+
+            if(found){
+                // Update velocity
+                last_velocity = best_center - center;
+                
+                // Direct assignment
+                center=best_center;
+                smooth_center=best_center;
+                ball_area=best_area;
+                smooth_area=best_area;
+                last_box=best_box;
+
+                last_seen_time = ros::Time::now().toSec();
+                consecutive_found++;
+                consecutive_lost=0;
+                
+                // Publish
                 v2_detection::BallCoordinate bc;
                 v2_detection::BallState bs;
                 v2_detection::Ballarea ba;
@@ -370,20 +409,29 @@ int main(int argc,char**argv){
                 pub_state.publish(bs);
                 pub_area.publish(ba);
                 
-                ROS_INFO("Ball Area Result : %d", ball_area);
-                break;
-            }
-
-            // Timeout check (matching Python)
-            if(found){
-                last_seen_time = ros::Time::now().toSec();
-            } else {
-                double current_time = ros::Time::now().toSec();
-                double delta = current_time - last_seen_time;
-                if(delta >= timeout_duration){
+                ROS_INFO_THROTTLE(0.1, "Ball Area: %d", ball_area);
+            }else{
+                consecutive_lost++;
+                consecutive_found=0;
+                
+                // Lock-out: don't lose immediately
+                if(consecutive_lost > LOCK_OUT_THRESHOLD){
                     state=NOTFOUND;
                     initialized=false;
-                    ROS_INFO("Timeout after %.2fs - switching to YOLO", delta);
+                    last_velocity=Point2f(0,0);
+                    ROS_INFO("Lost track after %d frames", consecutive_lost);
+                } else {
+                    // Predict during temporary loss
+                    center = center + last_velocity;
+                    center.x = clamp(center.x, 0.f, (float)frame.cols-1);
+                    center.y = clamp(center.y, 0.f, (float)frame.rows-1);
+                    
+                    // Keep publishing prediction
+                    v2_detection::BallCoordinate bc;
+                    bc.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
+                    bc.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
+                    bc.obj_size=ball_area;
+                    pub_coord.publish(bc);
                 }
             }
         }
@@ -393,7 +441,14 @@ int main(int argc,char**argv){
             rectangle(display_frame,last_box,Scalar(0,255,255),2);
             circle(display_frame, Point(int(center.x), int(center.y)), 5, Scalar(0,0,255), -1);
             
-            // Draw scan area (yellow vertical lines)
+            // Velocity vector
+            if(norm(last_velocity) > 1.0) {
+                Point2f vel_end = center + last_velocity*3.0f;
+                arrowedLine(display_frame, Point(center), Point(vel_end), 
+                           Scalar(255,0,255), 2);
+            }
+            
+            // Scan area
             line(display_frame, Point(scan_x[0],0), Point(scan_x[0],display_frame.rows), 
                  Scalar(0,255,255), 1);
             line(display_frame, Point(scan_x[1],0), Point(scan_x[1],display_frame.rows), 
