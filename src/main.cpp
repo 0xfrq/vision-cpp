@@ -99,6 +99,10 @@ void extractHSV(const Mat& img, const Rect& b) {
 
     min_v=*min_element(V.begin(),V.end());
     max_v=*max_element(V.begin(),V.end());
+    
+    // Debug output (matching Python)
+    ROS_INFO_THROTTLE(2.0, "HSV Range - H:[%d,%d] S:[%d,%d] V:[%d,%d]", 
+                     min_h, max_h, min_s, max_s, min_v, max_v);
 }
 
 /* =========================
@@ -164,7 +168,13 @@ int main(int argc,char**argv){
                 ball_area=smooth_area;
                 last_box=b;
 
-                int in_area = (ball_area<=5000)? int(sqrt(ball_area)*2.5f) : b.width+35;
+                // Calculate scan area based on ball size (matching Python)
+                int in_area;
+                if(ball_area <= 5000){
+                    in_area = int(b.width * 3);
+                }else{
+                    in_area = b.width + 35;
+                }
                 scan_x={int(center.x-in_area),int(center.x+in_area)};
 
                 extractHSV(frame,b);
@@ -177,13 +187,16 @@ int main(int argc,char**argv){
 
         /* ===== HSV TRACK ===== */
         else{
+            // Apply field mask for better tracking
+            Mat field_frame = extractField(frame);
 
             Mat hsv,mask;
-            cvtColor(frame,hsv,COLOR_BGR2HSV);
+            cvtColor(field_frame,hsv,COLOR_BGR2HSV);
             inRange(hsv,Scalar(min_h,min_s,min_v),Scalar(max_h,max_s,max_v),mask);
 
-            morphologyEx(mask,mask,MORPH_CLOSE,Mat::ones(5,5,CV_8U));
-            morphologyEx(mask,mask,MORPH_OPEN ,Mat::ones(5,5,CV_8U));
+            Mat kernel = Mat::ones(5,5,CV_8U);
+            morphologyEx(mask,mask,MORPH_CLOSE,kernel);
+            morphologyEx(mask,mask,MORPH_OPEN ,kernel);
 
             vector<vector<Point>> contours;
             findContours(mask,contours,RETR_EXTERNAL,CHAIN_APPROX_SIMPLE);
@@ -192,11 +205,14 @@ int main(int argc,char**argv){
 
             for(auto&c:contours){
                 double a=contourArea(c);
-                if(a<ball_area*0.2||a>ball_area*1.3) continue;
+                // Area filtering: 20% to 110% of previous area
+                if(a<ball_area*0.2||a>ball_area*1.1) continue;
 
                 Rect r=boundingRect(c);
                 int cx=r.x+r.width/2;
+                // Check if center is within scan area
                 if(cx<scan_x[0]||cx>scan_x[1]) continue;
+                // Minimum area threshold (3000 for non-fisheye)
                 if(a<3000) continue;
 
                 Point2f nc(cx,r.y+r.height/2);
@@ -210,6 +226,7 @@ int main(int argc,char**argv){
                 ball_area=smooth_area;
                 last_box=r;
 
+                // Dynamic timeout based on ball area
                 double timeout=map_value(ball_area,0,76800,0.5,80);
                 double now=ros::Time::now().toSec();
 
@@ -246,6 +263,10 @@ int main(int argc,char**argv){
             pub_coord.publish(bc);
             pub_area.publish(ba);
             rectangle(frame,last_box,Scalar(0,255,255),2);
+            
+            // Debug output (matching Python)
+            ROS_INFO_THROTTLE(1.0, "Ball Area: %d, Center: (%.1f, %.1f)", 
+                             ball_area, center.x, center.y);
         }else{
             bs.ball_status="NOTFOUND";
         }
