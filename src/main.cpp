@@ -176,8 +176,8 @@ void get_hsv_val(const cv::Mat& img) {
         V.push_back(hsv_val[2]);
     }
     
-    // sample atas_tengah point (extra point like Python)
-    int atas_py = (dot_tengah_y + y1 + h/4) / 3;
+    // sample atas_tengah point (extra point like Python - using h//5 not h//4)
+    int atas_py = (dot_tengah_y + y1 + h/5) / 2;
     int atas_px = dot_tengah_x;
     atas_py = std::max(0, std::min(img.rows-1, atas_py));
     atas_px = std::max(0, std::min(img.cols-1, atas_px));
@@ -249,15 +249,44 @@ int main(int argc, char** argv) {
 
         // ============ FOUND STATE - HSV TRACKING ============
         if(detect_status == "FOUND") {
-            cv::Mat field_img = extractField(img);
+            // Extract field EVERY frame (like Python) with proper HSV values
+            cv::Mat field_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5,5));
+            cv::Mat hsv_image;
+            cv::cvtColor(img, hsv_image, cv::COLOR_BGR2HSV);
             
-            cv::Mat hsv, binary_ball;
-            cv::cvtColor(field_img, hsv, cv::COLOR_BGR2HSV);
+            // Field HSV values (calibrated for green field)
+            cv::Mat field_binary;
+            cv::inRange(hsv_image, cv::Scalar(35, 40, 40), cv::Scalar(85, 255, 255), field_binary);
+            cv::erode(field_binary, field_binary, field_kernel, cv::Point(-1,-1), 2);
+            cv::dilate(field_binary, field_binary, field_kernel, cv::Point(-1,-1), 5);
+            
+            cv::Mat field_mask = cv::Mat::zeros(img.size(), CV_8UC1);
+            std::vector<std::vector<cv::Point>> field_contours;
+            cv::findContours(field_binary, field_contours, cv::RETR_TREE, cv::CHAIN_APPROX_NONE);
+            
+            cv::Mat field_img = img.clone();
+            if(field_contours.size() > 0) {
+                auto field_cntr = *std::max_element(field_contours.begin(), field_contours.end(),
+                    [](const std::vector<cv::Point>&a, const std::vector<cv::Point>&b){ 
+                        return cv::contourArea(a) < cv::contourArea(b); 
+                    });
+                std::vector<cv::Point> hull;
+                cv::convexHull(field_cntr, hull);
+                cv::fillConvexPoly(field_mask, hull, cv::Scalar(255));
+                cv::bitwise_and(img, img, field_img, field_mask);
+            }
+            
+            // Now apply ball HSV tracking on field-masked image
+            cv::Mat frame_copy = field_img.clone();
+            cv::Mat hsv;
+            cv::cvtColor(frame_copy, hsv, cv::COLOR_BGR2HSV);
+            
+            cv::Mat binary_ball;
             cv::inRange(hsv, cv::Scalar(min_h, min_s, min_v), cv::Scalar(max_h, max_s, max_v), binary_ball);
             
-            cv::Mat kernel = cv::Mat::ones(5, 5, CV_8U);
-            cv::morphologyEx(binary_ball, binary_ball, cv::MORPH_CLOSE, kernel);
-            cv::morphologyEx(binary_ball, binary_ball, cv::MORPH_OPEN, kernel);
+            cv::Mat kernel_bball = cv::Mat::ones(5, 5, CV_8U);
+            cv::morphologyEx(binary_ball, binary_ball, cv::MORPH_CLOSE, kernel_bball);
+            cv::morphologyEx(binary_ball, binary_ball, cv::MORPH_OPEN, kernel_bball);
             
             std::vector<std::vector<cv::Point>> contours;
             cv::findContours(binary_ball, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
