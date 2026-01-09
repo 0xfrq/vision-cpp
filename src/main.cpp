@@ -46,6 +46,12 @@ bool box_initialized = false;
 int target_blobsize = 416;
 int blobsize_step = 32;  // perubahan bertahap
 
+// reference brightness untuk normalisasi saat camera refocus
+float ref_brightness = -1.0f;  // rata-rata brightness saat ball ditemukan
+float ref_saturation = -1.0f;  // rata-rata saturation saat ball ditemukan
+bool ref_initialized = false;
+const float brightness_alpha = 0.1f;  // smooth update reference
+
 // timing dan fps
 double waktu_sebelum = 0.0;
 int frame_counter = 0;
@@ -92,6 +98,83 @@ void updateBlobsize() {
     } else if(blobsize > target_blobsize) {
         blobsize = max(blobsize - blobsize_step, target_blobsize);
     }
+}
+
+// hitung rata-rata brightness dan saturation dari frame
+void getFrameStats(const Mat& img, float& brightness, float& saturation) {
+    Mat hsv;
+    cvtColor(img, hsv, COLOR_BGR2HSV);
+    Scalar mean_val = mean(hsv);
+    saturation = mean_val[1];
+    brightness = mean_val[2];
+}
+
+// simpan reference brightness saat ball ditemukan
+void saveReference(const Mat& img) {
+    float curr_brightness, curr_saturation;
+    getFrameStats(img, curr_brightness, curr_saturation);
+    
+    if(!ref_initialized) {
+        ref_brightness = curr_brightness;
+        ref_saturation = curr_saturation;
+        ref_initialized = true;
+        ROS_INFO("reference saved: brightness=%.1f saturation=%.1f", ref_brightness, ref_saturation);
+    } else {
+        // smooth update reference
+        ref_brightness = brightness_alpha * curr_brightness + (1-brightness_alpha) * ref_brightness;
+        ref_saturation = brightness_alpha * curr_saturation + (1-brightness_alpha) * ref_saturation;
+    }
+}
+
+// normalisasi image berdasarkan reference brightness (untuk handle camera refocus)
+Mat normalizeImage(const Mat& img) {
+    if(!ref_initialized) return img.clone();
+    
+    float curr_brightness, curr_saturation;
+    getFrameStats(img, curr_brightness, curr_saturation);
+    
+    // hitung adjustment factor
+    float brightness_ratio = ref_brightness / max(curr_brightness, 1.0f);
+    float saturation_ratio = ref_saturation / max(curr_saturation, 1.0f);
+    
+    // clamp ratio untuk hindari over-correction
+    brightness_ratio = clamp(brightness_ratio, 0.7f, 1.4f);
+    saturation_ratio = clamp(saturation_ratio, 0.8f, 1.2f);
+    
+    // jika perbedaan kecil, skip normalisasi
+    if(abs(brightness_ratio - 1.0f) < 0.1f && abs(saturation_ratio - 1.0f) < 0.1f) {
+        return img.clone();
+    }
+    
+    // log periodically saat adjustment aktif
+    static double last_norm_log = 0;
+    double now = ros::Time::now().toSec();
+    if(now - last_norm_log > 2.0) {
+        ROS_INFO("normalizing: br=%.2f sat=%.2f (ref: %.1f/%.1f curr: %.1f/%.1f)", 
+                 brightness_ratio, saturation_ratio, 
+                 ref_brightness, ref_saturation,
+                 curr_brightness, curr_saturation);
+        last_norm_log = now;
+    }
+    
+    // convert ke HSV untuk adjust
+    Mat hsv, result;
+    cvtColor(img, hsv, COLOR_BGR2HSV);
+    
+    // adjust saturation dan value (brightness)
+    vector<Mat> channels;
+    split(hsv, channels);
+    
+    // adjust saturation
+    channels[1].convertTo(channels[1], -1, saturation_ratio, 0);
+    
+    // adjust brightness
+    channels[2].convertTo(channels[2], -1, brightness_ratio, 0);
+    
+    merge(channels, hsv);
+    cvtColor(hsv, result, COLOR_HSV2BGR);
+    
+    return result;
 }
 
 // ambil nilai hsv dari titik-titik di dalam bounding box bola
@@ -323,7 +406,9 @@ int main(int argc, char** argv) {
             updateBlobsize();
             yolo.setInputSize(blobsize);
             
-            auto dets = yolo.infer(img);
+            // normalize image untuk handle camera refocus/auto-exposure
+            Mat img_normalized = normalizeImage(img);
+            auto dets = yolo.infer(img_normalized);
             
             if(dets.empty()) {
                 ROS_INFO("yolo searching");
@@ -393,8 +478,9 @@ int main(int argc, char** argv) {
                     
                     ROS_INFO("bola [%.0f%%] area:%d", best_det.conf * 100, obj_size_ball);
                     
-                    // ambil hsv dari bola
+                    // ambil hsv dari bola dan simpan reference brightness
                     get_hsv_val(img);
+                    saveReference(img);
                     detect_status = FOUND;
                     waktu_sebelum = ros::Time::now().toSec();
                     
