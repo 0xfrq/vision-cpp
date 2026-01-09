@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
 
         // mode pencarian yolo
         if(detect_status == NOTFOUND) {
-            // set ukuran input dinamis
+            // set blobsize dinamis seperti python
             yolo.setInputSize(blobsize);
             
             auto dets = yolo.infer(img);

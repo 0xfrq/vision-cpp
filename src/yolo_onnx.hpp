@@ -22,15 +22,16 @@ private:
     Ort::Session session;
     Ort::SessionOptions session_options;
     
-    int input_width = 416;
+    int input_width = 416;   // fixed onnx model size
     int input_height = 416;
+    int blob_size = 416;     // dynamic processing size
     
-    void printModelInfo();  // Add this line
+    void printModelInfo();
 
 public:
     YoloONNX(const string& model_path);
     vector<Detection> infer(const cv::Mat& image);
-    void setInputSize(int size);  // Dynamic input size
+    void setInputSize(int size);  // set dynamic blobsize
 };
 
 #endif

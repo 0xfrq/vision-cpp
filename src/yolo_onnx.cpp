@@ -38,31 +38,37 @@ void YoloONNX::printModelInfo() {
 
 vector<Detection> YoloONNX::infer(const cv::Mat& image)
 {
-    // Store original dimensions
+    // ukuran asli frame
     int orig_width = image.cols;
     int orig_height = image.rows;
     
-    // resize dan normalize ke float
-    cv::Mat resized;
-    cv::resize(image, resized, cv::Size(input_width, input_height));
-    resized.convertTo(resized, CV_32F, 1.0 / 255.0);
+    // step 1: resize ke blobsize (seperti python size=blobsize)
+    cv::Mat blob_resized;
+    float scale = (float)blob_size / max(orig_width, orig_height);
+    int new_w = (int)(orig_width * scale);
+    int new_h = (int)(orig_height * scale);
+    cv::resize(image, blob_resized, cv::Size(new_w, new_h));
     
-    // BGR to RGB conversion dengan reshape untuk HWC to CHW lebih cepat
+    // step 2: letterbox padding ke 416x416 untuk onnx
+    cv::Mat padded = cv::Mat::zeros(input_height, input_width, CV_8UC3);
+    int pad_x = (input_width - new_w) / 2;
+    int pad_y = (input_height - new_h) / 2;
+    blob_resized.copyTo(padded(cv::Rect(pad_x, pad_y, new_w, new_h)));
+    
+    // normalize ke float
+    cv::Mat resized;
+    padded.convertTo(resized, CV_32F, 1.0 / 255.0);
+    
+    // BGR to RGB dan split channels
     vector<cv::Mat> channels(3);
     cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
     cv::split(resized, channels);
     
-    // HWC ke CHW dengan memcpy (paling cepat)
+    // HWC ke CHW dengan memcpy
     int channel_size = input_width * input_height;
     vector<float> input_tensor_values(3 * channel_size);
-    
-    // copy R channel
     memcpy(input_tensor_values.data(), channels[0].ptr<float>(), channel_size * sizeof(float));
-    
-    // copy G channel
     memcpy(input_tensor_values.data() + channel_size, channels[1].ptr<float>(), channel_size * sizeof(float));
-    
-    // copy B channel
     memcpy(input_tensor_values.data() + 2 * channel_size, channels[2].ptr<float>(), channel_size * sizeof(float));
     
     array<int64_t, 4> input_shape{1, 3, input_height, input_width};
@@ -92,42 +98,51 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
     int num_boxes = shape[1];
     int elements = shape[2];
     
-    // hitung faktor skala untuk konversi koordinat
-    float scale_x = static_cast<float>(orig_width) / input_width;
-    float scale_y = static_cast<float>(orig_height) / input_height;
-    
     vector<Detection> detections;
     
     // loop semua deteksi dari output model 
     for (int i = 0; i < num_boxes; i++) {
-        // format yolo: [x_center, y_center, width, height, confidence, class_scores...]
         float cx = output[i * elements + 0];
         float cy = output[i * elements + 1];
         float w  = output[i * elements + 2];
         float h  = output[i * elements + 3];
         float conf = output[i * elements + 4];
         
-        // filter confidence threshold - lower for faster detection
+        // filter confidence
         if (conf < 0.40) continue;
         
-        // scale koordinat ke ukuran frame asli tanpa clamp (lebih cepat)
-        int x = (int)(cx * scale_x - (w * scale_x) / 2);
-        int y = (int)(cy * scale_y - (h * scale_y) / 2);
-        int width = (int)(w * scale_x);
-        int height = (int)(h * scale_y);
+        // konversi dari 416x416 letterbox ke koordinat asli
+        // 1. hapus padding
+        float cx_unpad = cx - pad_x;
+        float cy_unpad = cy - pad_y;
+        float w_unpad = w;
+        float h_unpad = h;
         
-        // simpan deteksi tanpa boundary check
-        Detection det;
-        det.box = cv::Rect(x, y, width, height);
-        det.conf = conf;
-        det.class_id = 0;
-        detections.push_back(det);
+        // 2. scale balik ke ukuran asli
+        float inv_scale = 1.0f / scale;
+        int x = (int)((cx_unpad - w_unpad/2) * inv_scale);
+        int y = (int)((cy_unpad - h_unpad/2) * inv_scale);
+        int width = (int)(w_unpad * inv_scale);
+        int height = (int)(h_unpad * inv_scale);
+        
+        // clamp ke batas frame
+        x = max(0, min(x, orig_width - 1));
+        y = max(0, min(y, orig_height - 1));
+        width = min(width, orig_width - x);
+        height = min(height, orig_height - y);
+        
+        if(width > 0 && height > 0) {
+            Detection det;
+            det.box = cv::Rect(x, y, width, height);
+            det.conf = conf;
+            det.class_id = 0;
+            detections.push_back(det);
+        }
     }
     
     return detections;
 }
 
 void YoloONNX::setInputSize(int size) {
-    input_width = size;
-    input_height = size;
+    blob_size = size;
 }
