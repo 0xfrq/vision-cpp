@@ -7,16 +7,17 @@ YoloONNX::YoloONNX(const string& model_path)
     : env(ORT_LOGGING_LEVEL_WARNING, "yolo"),
       session(nullptr)
 {
-    // set thread count untuk inferensi lebih cepat
-    session_options.SetIntraOpNumThreads(1);
-    // enable optimasi basic untuk peningkatan performa
+    // multi-thread untuk inferensi lebih cepat
+    session_options.SetIntraOpNumThreads(2);
     session_options.SetGraphOptimizationLevel(
-        GraphOptimizationLevel::ORT_ENABLE_BASIC);
+        GraphOptimizationLevel::ORT_ENABLE_ALL);
     
-    // load session model yolo
+    // pre-allocate buffers untuk hindari alokasi berulang
+    padded_buffer = cv::Mat::zeros(input_height, input_width, CV_8UC3);
+    float_buffer = cv::Mat(input_height, input_width, CV_32FC3);
+    input_tensor_values.resize(3 * input_width * input_height);
+    
     session = Session(env, model_path.c_str(), session_options);
-    
-    // print info model saat pertama kali load
     printModelInfo();
 }
 
@@ -38,106 +39,125 @@ void YoloONNX::printModelInfo() {
 
 vector<Detection> YoloONNX::infer(const cv::Mat& image)
 {
-    // ukuran asli frame
-    int orig_width = image.cols;
-    int orig_height = image.rows;
+    int orig_w = image.cols;
+    int orig_h = image.rows;
     
-    // step 1: resize ke blobsize (seperti python size=blobsize)
-    cv::Mat blob_resized;
-    float scale = (float)blob_size / max(orig_width, orig_height);
-    int new_w = (int)(orig_width * scale);
-    int new_h = (int)(orig_height * scale);
-    cv::resize(image, blob_resized, cv::Size(new_w, new_h));
+    // hitung scale dan padding hanya jika blobsize berubah (hindari frame drop)
+    if(blob_size != last_blob_size) {
+        cached_scale = (float)blob_size / max(orig_w, orig_h);
+        cached_new_w = (int)(orig_w * cached_scale);
+        cached_new_h = (int)(orig_h * cached_scale);
+        cached_pad_x = (input_width - cached_new_w) / 2;
+        cached_pad_y = (input_height - cached_new_h) / 2;
+        last_blob_size = blob_size;
+        
+        // reset padded buffer ke hitam
+        padded_buffer.setTo(cv::Scalar(0, 0, 0));
+    }
     
-    // step 2: letterbox padding ke 416x416 untuk onnx
-    cv::Mat padded = cv::Mat::zeros(input_height, input_width, CV_8UC3);
-    int pad_x = (input_width - new_w) / 2;
-    int pad_y = (input_height - new_h) / 2;
-    blob_resized.copyTo(padded(cv::Rect(pad_x, pad_y, new_w, new_h)));
+    // resize langsung ke roi dalam padded buffer
+    cv::Mat roi = padded_buffer(cv::Rect(cached_pad_x, cached_pad_y, cached_new_w, cached_new_h));
+    cv::resize(image, roi, cv::Size(cached_new_w, cached_new_h), 0, 0, cv::INTER_LINEAR);
     
-    // normalize ke float
-    cv::Mat resized;
-    padded.convertTo(resized, CV_32F, 1.0 / 255.0);
+    // normalize dan convert BGR->RGB dalam satu pass
+    const uchar* src = padded_buffer.ptr<uchar>();
+    float* r_ptr = input_tensor_values.data();
+    float* g_ptr = r_ptr + input_width * input_height;
+    float* b_ptr = g_ptr + input_width * input_height;
     
-    // BGR to RGB dan split channels
-    vector<cv::Mat> channels(3);
-    cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
-    cv::split(resized, channels);
+    const float inv255 = 1.0f / 255.0f;
+    int total = input_width * input_height;
+    for(int i = 0; i < total; i++) {
+        int idx = i * 3;
+        r_ptr[i] = src[idx + 2] * inv255;
+        g_ptr[i] = src[idx + 1] * inv255;
+        b_ptr[i] = src[idx + 0] * inv255;
+    }
     
-    // HWC ke CHW dengan memcpy
-    int channel_size = input_width * input_height;
-    vector<float> input_tensor_values(3 * channel_size);
-    memcpy(input_tensor_values.data(), channels[0].ptr<float>(), channel_size * sizeof(float));
-    memcpy(input_tensor_values.data() + channel_size, channels[1].ptr<float>(), channel_size * sizeof(float));
-    memcpy(input_tensor_values.data() + 2 * channel_size, channels[2].ptr<float>(), channel_size * sizeof(float));
-    
+    // run inference
     array<int64_t, 4> input_shape{1, 3, input_height, input_width};
-    Ort::MemoryInfo memory_info =
-        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-        memory_info,
-        input_tensor_values.data(),
-        input_tensor_values.size(),
-        input_shape.data(),
-        input_shape.size()
-    );
+        mem_info, input_tensor_values.data(), input_tensor_values.size(),
+        input_shape.data(), input_shape.size());
     
     const char* input_names[] = {"images"};
     const char* output_names[] = {"output0"};
-    auto outputs = session.Run(
-        Ort::RunOptions{nullptr},
-        input_names,
-        &input_tensor,
-        1,
-        output_names,
-        1
-    );
+    auto outputs = session.Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
     
-    float* output = outputs[0].GetTensorMutableData<float>();
+    float* out = outputs[0].GetTensorMutableData<float>();
     auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
     int num_boxes = shape[1];
     int elements = shape[2];
     
-    vector<Detection> detections;
+    float inv_scale = 1.0f / cached_scale;
     
-    // loop semua deteksi dari output model 
-    for (int i = 0; i < num_boxes; i++) {
-        float cx = output[i * elements + 0];
-        float cy = output[i * elements + 1];
-        float w  = output[i * elements + 2];
-        float h  = output[i * elements + 3];
-        float conf = output[i * elements + 4];
+    vector<Detection> detections;
+    detections.reserve(20);
+    
+    // confidence lebih rendah untuk deteksi bola partial
+    const float conf_threshold = 0.30f;
+    
+    for(int i = 0; i < num_boxes; i++) {
+        float conf = out[i * elements + 4];
+        if(conf < conf_threshold) continue;
         
-        // filter confidence
-        if (conf < 0.40) continue;
+        float cx = out[i * elements + 0] - cached_pad_x;
+        float cy = out[i * elements + 1] - cached_pad_y;
+        float w = out[i * elements + 2];
+        float h = out[i * elements + 3];
         
-        // konversi dari 416x416 letterbox ke koordinat asli
-        // 1. hapus padding
-        float cx_unpad = cx - pad_x;
-        float cy_unpad = cy - pad_y;
-        float w_unpad = w;
-        float h_unpad = h;
+        // expand box sedikit untuk capture full ball (10% padding)
+        float expand = 0.1f;
+        w *= (1.0f + expand);
+        h *= (1.0f + expand);
         
-        // 2. scale balik ke ukuran asli
-        float inv_scale = 1.0f / scale;
-        int x = (int)((cx_unpad - w_unpad/2) * inv_scale);
-        int y = (int)((cy_unpad - h_unpad/2) * inv_scale);
-        int width = (int)(w_unpad * inv_scale);
-        int height = (int)(h_unpad * inv_scale);
+        int x = (int)((cx - w * 0.5f) * inv_scale);
+        int y = (int)((cy - h * 0.5f) * inv_scale);
+        int width = (int)(w * inv_scale);
+        int height = (int)(h * inv_scale);
         
         // clamp ke batas frame
-        x = max(0, min(x, orig_width - 1));
-        y = max(0, min(y, orig_height - 1));
-        width = min(width, orig_width - x);
-        height = min(height, orig_height - y);
+        x = max(0, min(x, orig_w - 1));
+        y = max(0, min(y, orig_h - 1));
+        width = min(width, orig_w - x);
+        height = min(height, orig_h - y);
         
-        if(width > 0 && height > 0) {
+        if(width > 5 && height > 5) {
             Detection det;
             det.box = cv::Rect(x, y, width, height);
             det.conf = conf;
             det.class_id = 0;
             detections.push_back(det);
         }
+    }
+    
+    // simple NMS untuk gabungkan deteksi overlapping
+    if(detections.size() > 1) {
+        vector<Detection> nms_result;
+        vector<bool> suppressed(detections.size(), false);
+        
+        // sort by confidence
+        sort(detections.begin(), detections.end(), 
+             [](const Detection& a, const Detection& b) { return a.conf > b.conf; });
+        
+        for(size_t i = 0; i < detections.size(); i++) {
+            if(suppressed[i]) continue;
+            nms_result.push_back(detections[i]);
+            
+            for(size_t j = i + 1; j < detections.size(); j++) {
+                if(suppressed[j]) continue;
+                
+                // hitung IoU
+                cv::Rect inter = detections[i].box & detections[j].box;
+                float inter_area = inter.area();
+                float union_area = detections[i].box.area() + detections[j].box.area() - inter_area;
+                float iou = inter_area / union_area;
+                
+                if(iou > 0.4f) suppressed[j] = true;
+            }
+        }
+        return nms_result;
     }
     
     return detections;
