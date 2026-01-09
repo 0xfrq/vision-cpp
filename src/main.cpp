@@ -47,11 +47,6 @@ int target_blobsize = 416;
 int blobsize_step = 32;  // perubahan bertahap
 
 // reference brightness untuk normalisasi saat camera refocus
-float ref_brightness = -1.0f;  // rata-rata brightness saat ball ditemukan
-float ref_saturation = -1.0f;  // rata-rata saturation saat ball ditemukan
-bool ref_initialized = false;
-const float brightness_alpha = 0.1f;  // smooth update reference
-
 // timing dan fps
 double waktu_sebelum = 0.0;
 int frame_counter = 0;
@@ -100,79 +95,25 @@ void updateBlobsize() {
     }
 }
 
-// hitung rata-rata brightness dan saturation dari frame
-void getFrameStats(const Mat& img, float& brightness, float& saturation) {
-    Mat hsv;
-    cvtColor(img, hsv, COLOR_BGR2HSV);
-    Scalar mean_val = mean(hsv);
-    saturation = mean_val[1];
-    brightness = mean_val[2];
-}
+// CLAHE untuk normalize lighting (lebih robust dari simple brightness adjustment)
+Ptr<CLAHE> clahe = createCLAHE(2.0, Size(8, 8));
 
-// simpan reference brightness saat ball ditemukan
-void saveReference(const Mat& img) {
-    float curr_brightness, curr_saturation;
-    getFrameStats(img, curr_brightness, curr_saturation);
-    
-    if(!ref_initialized) {
-        ref_brightness = curr_brightness;
-        ref_saturation = curr_saturation;
-        ref_initialized = true;
-        ROS_INFO("reference saved: brightness=%.1f saturation=%.1f", ref_brightness, ref_saturation);
-    } else {
-        // smooth update reference
-        ref_brightness = brightness_alpha * curr_brightness + (1-brightness_alpha) * ref_brightness;
-        ref_saturation = brightness_alpha * curr_saturation + (1-brightness_alpha) * ref_saturation;
-    }
-}
-
-// normalisasi image berdasarkan reference brightness (untuk handle camera refocus)
+// normalize image dengan CLAHE - lebih efektif untuk camera auto-exposure
 Mat normalizeImage(const Mat& img) {
-    if(!ref_initialized) return img.clone();
+    // convert ke LAB color space
+    Mat lab, result;
+    cvtColor(img, lab, COLOR_BGR2Lab);
     
-    float curr_brightness, curr_saturation;
-    getFrameStats(img, curr_brightness, curr_saturation);
+    // split channels
+    vector<Mat> lab_channels;
+    split(lab, lab_channels);
     
-    // hitung adjustment factor
-    float brightness_ratio = ref_brightness / max(curr_brightness, 1.0f);
-    float saturation_ratio = ref_saturation / max(curr_saturation, 1.0f);
+    // apply CLAHE hanya ke L channel (lightness)
+    clahe->apply(lab_channels[0], lab_channels[0]);
     
-    // clamp ratio untuk hindari over-correction
-    brightness_ratio = clamp(brightness_ratio, 0.7f, 1.4f);
-    saturation_ratio = clamp(saturation_ratio, 0.8f, 1.2f);
-    
-    // jika perbedaan kecil, skip normalisasi
-    if(abs(brightness_ratio - 1.0f) < 0.1f && abs(saturation_ratio - 1.0f) < 0.1f) {
-        return img.clone();
-    }
-    
-    // log periodically saat adjustment aktif
-    static double last_norm_log = 0;
-    double now = ros::Time::now().toSec();
-    if(now - last_norm_log > 2.0) {
-        ROS_INFO("normalizing: br=%.2f sat=%.2f (ref: %.1f/%.1f curr: %.1f/%.1f)", 
-                 brightness_ratio, saturation_ratio, 
-                 ref_brightness, ref_saturation,
-                 curr_brightness, curr_saturation);
-        last_norm_log = now;
-    }
-    
-    // convert ke HSV untuk adjust
-    Mat hsv, result;
-    cvtColor(img, hsv, COLOR_BGR2HSV);
-    
-    // adjust saturation dan value (brightness)
-    vector<Mat> channels;
-    split(hsv, channels);
-    
-    // adjust saturation
-    channels[1].convertTo(channels[1], -1, saturation_ratio, 0);
-    
-    // adjust brightness
-    channels[2].convertTo(channels[2], -1, brightness_ratio, 0);
-    
-    merge(channels, hsv);
-    cvtColor(hsv, result, COLOR_HSV2BGR);
+    // merge dan convert back
+    merge(lab_channels, lab);
+    cvtColor(lab, result, COLOR_Lab2BGR);
     
     return result;
 }
@@ -317,12 +258,14 @@ int main(int argc, char** argv) {
         Mat img = capture.read();
         if(img.empty()) { ros::spinOnce(); continue; }
         
-        Mat img_result = img.clone();
+        // apply CLAHE sekali untuk semua mode (handle camera auto-exposure)
+        Mat img_normalized = normalizeImage(img);
+        Mat img_result = img_normalized.clone();
 
         // mode tracking hsv
         if(detect_status == FOUND) {
             // ekstrak lapangan
-            Mat field_img = extractField(img);
+            Mat field_img = extractField(img_normalized);
             
             // konversi ke hsv dan buat mask bola
             Mat hsv, binary_ball;
@@ -406,8 +349,7 @@ int main(int argc, char** argv) {
             updateBlobsize();
             yolo.setInputSize(blobsize);
             
-            // normalize image untuk handle camera refocus/auto-exposure
-            Mat img_normalized = normalizeImage(img);
+            // img sudah dinormalize di awal loop
             auto dets = yolo.infer(img_normalized);
             
             if(dets.empty()) {
@@ -478,9 +420,8 @@ int main(int argc, char** argv) {
                     
                     ROS_INFO("bola [%.0f%%] area:%d", best_det.conf * 100, obj_size_ball);
                     
-                    // ambil hsv dari bola dan simpan reference brightness
-                    get_hsv_val(img);
-                    saveReference(img);
+                    // ambil hsv dari bola
+                    get_hsv_val(img_normalized);
                     detect_status = FOUND;
                     waktu_sebelum = ros::Time::now().toSec();
                     
