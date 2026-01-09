@@ -95,29 +95,6 @@ void updateBlobsize() {
     }
 }
 
-// CLAHE untuk normalize lighting (lebih robust dari simple brightness adjustment)
-Ptr<CLAHE> clahe = createCLAHE(2.0, Size(8, 8));
-
-// normalize image dengan CLAHE - lebih efektif untuk camera auto-exposure
-Mat normalizeImage(const Mat& img) {
-    // convert ke LAB color space
-    Mat lab, result;
-    cvtColor(img, lab, COLOR_BGR2Lab);
-    
-    // split channels
-    vector<Mat> lab_channels;
-    split(lab, lab_channels);
-    
-    // apply CLAHE hanya ke L channel (lightness)
-    clahe->apply(lab_channels[0], lab_channels[0]);
-    
-    // merge dan convert back
-    merge(lab_channels, lab);
-    cvtColor(lab, result, COLOR_Lab2BGR);
-    
-    return result;
-}
-
 // ambil nilai hsv dari titik-titik di dalam bounding box bola
 void get_hsv_val(const Mat& img) {
     int x1 = x_ball, y1 = y_ball;
@@ -258,14 +235,12 @@ int main(int argc, char** argv) {
         Mat img = capture.read();
         if(img.empty()) { ros::spinOnce(); continue; }
         
-        // apply CLAHE sekali untuk semua mode (handle camera auto-exposure)
-        Mat img_normalized = normalizeImage(img);
-        Mat img_result = img_normalized.clone();
+        Mat img_result = img.clone();
 
         // mode tracking hsv
         if(detect_status == FOUND) {
             // ekstrak lapangan
-            Mat field_img = extractField(img_normalized);
+            Mat field_img = extractField(img);
             
             // konversi ke hsv dan buat mask bola
             Mat hsv, binary_ball;
@@ -349,8 +324,7 @@ int main(int argc, char** argv) {
             updateBlobsize();
             yolo.setInputSize(blobsize);
             
-            // img sudah dinormalize di awal loop
-            auto dets = yolo.infer(img_normalized);
+            auto dets = yolo.infer(img);
             
             if(dets.empty()) {
                 ROS_INFO("yolo searching");
@@ -421,7 +395,7 @@ int main(int argc, char** argv) {
                     ROS_INFO("bola [%.0f%%] area:%d", best_det.conf * 100, obj_size_ball);
                     
                     // ambil hsv dari bola
-                    get_hsv_val(img_normalized);
+                    get_hsv_val(img);
                     detect_status = FOUND;
                     waktu_sebelum = ros::Time::now().toSec();
                     
