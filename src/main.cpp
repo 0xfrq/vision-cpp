@@ -98,6 +98,9 @@ double fps_start_time = 0.0;
 double fps = 0.0;
 constexpr double FPS_DISPLAY_INTERVAL = 0.2;
 
+/* Dynamic blob size (like Python) */
+int blobsize = 416;  // 416=search, 320=far, 224=close
+
 /* =========================
    FPS CALCULATOR
    ========================= */
@@ -290,7 +293,9 @@ int main(int argc,char**argv){
 
         /* ===== YOLO ===== */
         if(state==NOTFOUND){
-
+            // Set dynamic blobsize for YOLO inference
+            yolo.setInputSize(blobsize);
+            
             auto dets=yolo.infer(frame);
             bool yolo_found = false;
             
@@ -345,7 +350,14 @@ int main(int argc,char**argv){
                 pub_coord.publish(bc_immediate);
                 pub_area.publish(ba_immediate);
                 
-                ROS_INFO("YOLO: Ball locked - Area:%d, Conf:%.2f", ball_area, d.conf);
+                // Dynamic blobsize based on ball area (like Python)
+                if(ball_area <= 2800) {
+                    blobsize = 320;  // Far ball - medium size
+                } else {
+                    blobsize = 224;  // Close ball - small size for speed
+                }
+                
+                ROS_INFO("YOLO: Ball locked - Area:%d, Conf:%.2f, Blob:%d", ball_area, d.conf, blobsize);
                 break;
             }
             
@@ -354,6 +366,9 @@ int main(int argc,char**argv){
                 v2_detection::BallState bs_nf;
                 bs_nf.ball_status="NOTFOUND";
                 pub_state.publish(bs_nf);
+                
+                // Reset to large blobsize for searching
+                blobsize = 416;
             }
         }
 
@@ -481,6 +496,13 @@ int main(int argc,char**argv){
                 pub_state.publish(bs_track);
                 pub_area.publish(ba_track);
                 
+                // Update dynamic blobsize based on ball area (like Python)
+                if(ball_area <= 2800) {
+                    blobsize = 320;  // Far ball - medium size
+                } else {
+                    blobsize = 224;  // Close ball - small size for speed
+                }
+                
                 // Print like Python
                 ROS_INFO_THROTTLE(0.1, "\nFOUND\nBall Area Result : %d\n", ball_area);
             }else{
@@ -544,7 +566,8 @@ int main(int argc,char**argv){
                     state=NOTFOUND;
                     initialized=false;
                     last_velocity=Point2f(0,0);
-                    ROS_INFO("Track lost after %d frames - switching to YOLO", consecutive_lost);
+                    blobsize = 416;  // Reset to large size for searching
+                    ROS_INFO("Track lost after %d frames - switching to YOLO search (blob:%d)", consecutive_lost, blobsize);
                 } else {
                     // Try prediction during temporary loss
                     center = center + last_velocity;
@@ -582,11 +605,6 @@ int main(int argc,char**argv){
             // Advanced velocity vector visualization with trajectory prediction
             float vel_magnitude = norm(smooth_velocity);
             if(vel_magnitude > 0.5) {
-                // Main velocity arrow (pink/magenta)
-                Point2f vel_end = center + smooth_velocity * 5.0f;
-                arrowedLine(display_frame, Point(center), Point(vel_end), 
-                           Scalar(255,0,255), 3, LINE_AA, 0, 0.3);
-                
                 // Predicted trajectory path with acceleration (cyan)
                 if(norm(acceleration) > 0.05 && consecutive_found > 3) {
                     vector<Point2f> trajectory_points;
@@ -705,14 +723,6 @@ int main(int argc,char**argv){
                         exit_velocity.x, exit_velocity.y, norm(exit_velocity));
                 putText(display_frame, vel_text, Point(5, 145), 
                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0, 0, 255), 1);
-                
-                // Draw exit arrow from last known position
-                if(norm(exit_velocity) > 1.0) {
-                    Point2f arrow_end = last_known_position + exit_velocity * 10.0f;
-                    arrowedLine(display_frame, Point(last_known_position), Point(arrow_end),
-                               Scalar(0, 0, 255), 3, LINE_AA, 0, 0.3);
-                    circle(display_frame, Point(last_known_position), 8, Scalar(0, 0, 255), 2);
-                }
             }
         }
         
@@ -723,6 +733,12 @@ int main(int argc,char**argv){
         char fps_text[50];
         snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", fps);
         putText(display_frame, fps_text, Point(5, 15), 
+                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
+        
+        // Display blobsize (like Python)
+        char blob_text[20];
+        snprintf(blob_text, sizeof(blob_text), "%d", blobsize);
+        putText(display_frame, blob_text, Point(280, 15), 
                 FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
         
         char status_text[50];

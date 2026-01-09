@@ -30,6 +30,7 @@ private:
 public:
     YoloONNX(const string& model_path);
     vector<Detection> infer(const cv::Mat& image);
+    void setInputSize(int size);  // Dynamic input size
 };
 
 #endif

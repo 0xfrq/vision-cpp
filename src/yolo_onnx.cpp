@@ -107,8 +107,8 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
         float h  = output[i * elements + 3];
         float conf = output[i * elements + 4];
         
-        // filter confidence threshold yang lebih tinggi untuk skip deteksi lemah
-        if (conf < 0.55) continue;
+        // filter confidence threshold - lower for faster detection
+        if (conf < 0.40) continue;
         
         // scale koordinat ke ukuran frame asli tanpa clamp (lebih cepat)
         int x = (int)(cx * scale_x - (w * scale_x) / 2);
@@ -125,4 +125,9 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
     }
     
     return detections;
+}
+
+void YoloONNX::setInputSize(int size) {
+    input_width = size;
+    input_height = size;
 }
