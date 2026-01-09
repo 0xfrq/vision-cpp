@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
                 pub_state.publish(bs);
                 
                 // target blobsize 416 untuk search mode
-                target_blobsize = 416;
+                target_blobsize = 320;
             } else {
                 // pilih deteksi dengan confidence tertinggi
                 Detection best_det = dets[0];
