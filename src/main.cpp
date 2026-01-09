@@ -1,169 +1,103 @@
+// deteksi bola yolov5 + hsv tracking untuk robot sepak bola
 #include <ros/ros.h>
 #include <ros/package.h>
-
 #include <v2_detection/BallState.h>
 #include <v2_detection/BallCoordinate.h>
 #include <v2_detection/Ballarea.h>
-
 #include <opencv2/opencv.hpp>
-#include <chrono>
-#include <vector>
-#include <algorithm>
-#include <cmath>
 #include <thread>
 #include <mutex>
-
+#include <algorithm>
 #include "yolo_onnx.hpp"
 
 using namespace cv;
 using namespace std;
 
-/* =========================
-   UTIL
-   ========================= */
+// fungsi utilitas
 template<typename T>
-inline T clamp(T v, T lo, T hi) {
-    return (v < lo) ? lo : (v > hi) ? hi : v;
-}
+inline T clamp(T v, T lo, T hi) { return (v < lo) ? lo : (v > hi) ? hi : v; }
 
 double map_value(double v, double smin, double smax, double tmin, double tmax) {
     v = clamp(v, min(smin, smax), max(smin, smax));
     return tmin + (v - smin) * (tmax - tmin) / (smax - smin);
 }
 
-/* =========================
-   STATE
-   ========================= */
+// status deteksi
 enum DetectState { NOTFOUND = 0, FOUND = 1 };
-DetectState state = NOTFOUND;
+DetectState detect_status = NOTFOUND;
 
-/* HSV */
+// hsv range untuk tracking
 int min_h=0, min_s=0, min_v=0;
 int max_h=0, max_s=0, max_v=0;
 
-/* Tracking */
-Point2f center(0,0);
-Point2f smooth_center(0,0);
-Point2f velocity(0,0);
-Point2f smooth_velocity(0,0);  // Smoothed velocity for better prediction
-Point2f acceleration(0,0);      // Acceleration for trajectory
-bool initialized = false;
-
-// Velocity history for smoothing
-std::deque<Point2f> velocity_history;
-constexpr int VELOCITY_HISTORY_SIZE = 5;
-
-// Position history for exit tracking
-struct PositionRecord {
-    Point2f position;
-    double timestamp;
-    Point2f velocity;
-    int area;
-};
-std::deque<PositionRecord> position_history;
-constexpr int POSITION_HISTORY_SIZE = 10;  // Last 10 positions
-
-// Exit tracking
-Point2f last_known_position(0,0);
-Point2f exit_velocity(0,0);
-std::string exit_direction = "";
-double exit_timestamp = 0.0;
-bool ball_exited_frame = false;
-
+// data bola
+int x_ball=0, y_ball=0, w_ball=0, h_ball=0;
 int ball_area = 0;
-int smooth_area = 0;
+Point2f center_ball(0,0);
+vector<int> scan_area(2,0);
 Rect last_box;
-vector<int> scan_x(2,0);
 
-/* Timing */
-double last_seen = 0.0;
-int hsv_fail = 0;
-int yolo_skip_counter = 0;  // Skip YOLO frames when tracking
-Point2f last_velocity(0,0);  // For prediction
-int consecutive_found = 0;   // Lock-in counter
-int consecutive_lost = 0;    // Loss counter
-
-/* Params - Matching Python's direct tracking behavior */
-constexpr int HSV_FAIL_MAX = 13;        // Increased tolerance
-constexpr float POS_ALPHA = 0.0f;       // Direct position (no smoothing like Python)
-constexpr float AREA_ALPHA = 0.0f;      // Direct area (no smoothing like Python)  
-constexpr float VEL_ALPHA = 0.0f;       // No velocity prediction (match Python)
-constexpr int YOLO_SKIP_FRAMES = 3;     // Skip YOLO when tracking well
-constexpr int LOCK_IN_THRESHOLD = 3;    // Frames needed to lock tracking
-constexpr int LOCK_OUT_THRESHOLD = 20;  // Frames needed to lose tracking
-
-/* FPS Tracking */
+// timing dan fps
+double waktu_sebelum = 0.0;
 int frame_counter = 0;
 double fps_start_time = 0.0;
 double fps = 0.0;
-constexpr double FPS_DISPLAY_INTERVAL = 0.2;
 
-/* Dynamic blob size (like Python) */
-int blobsize = 416;  // 416=search, 320=far, 224=close
+// ukuran frame dan blobsize dinamis
+const int framesize[2] = {320, 240};
+int blobsize = 416;
 
-/* =========================
-   FPS CALCULATOR
-   ========================= */
+// hitung fps setiap 0.2 detik
 void calculate_fps() {
     frame_counter++;
     double current_time = ros::Time::now().toSec();
     double elapsed = current_time - fps_start_time;
-    
-    if(elapsed >= FPS_DISPLAY_INTERVAL) {
+    if(elapsed >= 0.2) {
         fps = frame_counter / elapsed;
         frame_counter = 0;
         fps_start_time = current_time;
     }
 }
 
-/* =========================
-   HSV SAMPLING (PY PORT)
-   ========================= */
-void extractHSV(const Mat& img, const Rect& b) {
-
-    vector<Point> pts;
-    int x1=b.x, y1=b.y, x2=b.x+b.width, y2=b.y+b.height;
-    Point mid((x1+x2)/2, (y1+y2)/2);
-
-    pts = {
-        mid,
-        {(x1+mid.x)/2,(y1+mid.y)/2},
-        {(x2+mid.x)/2,(y2+mid.y)/2},
-        {(mid.x+x2)/2,(mid.y+y1)/2},
-        {(x1+mid.x)/2,(y1+y2+mid.y)/2},
-        {mid.x,(mid.y+y1+b.height/5)/2},
-        {mid.x,(mid.y+y2)/2}
-    };
-
-    vector<int> H,S,V;
-
-    for (auto&p:pts){
-        int px=clamp(p.x,0,img.cols-1);
-        int py=clamp(p.y,0,img.rows-1);
-        Vec3b bgr=img.at<Vec3b>(py,px);
+// ambil nilai hsv dari titik-titik di dalam bounding box bola
+void get_hsv_val(const Mat& img) {
+    int x1 = x_ball, y1 = y_ball;
+    int x2 = x_ball + w_ball, y2 = y_ball + h_ball;
+    
+    // titik-titik sampling seperti python
+    Point dot_tengah((x1+x2)/2, (y1+y2)/2);
+    Point dot_sepertiga_kanan((x1+dot_tengah.x)/2, (y1+dot_tengah.y)/2);
+    Point dot_duapertiga_kanan((x2+dot_tengah.x)/2, (y2+dot_tengah.y)/2);
+    Point dot_sepertiga_kiri((dot_tengah.x+(x1+(x2-x1)))/2, (dot_tengah.y+y1)/2);
+    Point dot_duapertiga_kiri((x1+dot_tengah.x)/2, (y1+(y2-y1)+dot_tengah.y)/2);
+    Point dot_bawah_tengah(dot_tengah.x, (dot_tengah.y+y2)/2);
+    
+    vector<Point> dots = {dot_tengah, dot_sepertiga_kanan, dot_duapertiga_kanan, 
+                          dot_sepertiga_kiri, dot_duapertiga_kiri, dot_bawah_tengah};
+    
+    vector<int> H, S, V;
+    
+    for(auto& p : dots) {
+        int px = clamp(p.x, 0, img.cols-1);
+        int py = clamp(p.y, 0, img.rows-1);
+        Vec3b bgr = img.at<Vec3b>(py, px);
         Mat hsv;
-        cvtColor(Mat(1,1,CV_8UC3,Scalar(bgr[0],bgr[1],bgr[2])),hsv,COLOR_BGR2HSV);
-        Vec3b hv=hsv.at<Vec3b>(0,0);
+        cvtColor(Mat(1,1,CV_8UC3,Scalar(bgr[0],bgr[1],bgr[2])), hsv, COLOR_BGR2HSV);
+        Vec3b hv = hsv.at<Vec3b>(0,0);
         H.push_back(hv[0]); S.push_back(hv[1]); V.push_back(hv[2]);
     }
-
-    min_h=*min_element(H.begin(),H.end());
-    max_h=min(*max_element(H.begin(),H.end()),33);
-
-    min_s=max(*min_element(S.begin(),S.end()),160);
-    max_s=*max_element(S.begin(),S.end());
-
-    min_v=*min_element(V.begin(),V.end());
-    max_v=*max_element(V.begin(),V.end());
     
-    // Debug output (matching Python)
-    ROS_INFO_THROTTLE(2.0, "HSV Range - H:[%d,%d] S:[%d,%d] V:[%d,%d]", 
-                     min_h, max_h, min_s, max_s, min_v, max_v);
+    min_h = *min_element(H.begin(), H.end());
+    max_h = min(*max_element(H.begin(), H.end()), 33);
+    min_s = max(*min_element(S.begin(), S.end()), 160);
+    max_s = *max_element(S.begin(), S.end());
+    min_v = *min_element(V.begin(), V.end());
+    max_v = *max_element(V.begin(), V.end());
+    
+    ROS_INFO("hsv: h[%d,%d] s[%d,%d] v[%d,%d]", min_h, max_h, min_s, max_s, min_v, max_v);
 }
 
-/* =========================
-   THREADED VIDEO CAPTURE (matching Python WebcamVideoStream)
-   ========================= */
+// threaded video capture seperti python webcamvideostream
 class ThreadedCapture {
 private:
     VideoCapture cap;
@@ -187,15 +121,13 @@ public:
     ThreadedCapture(int src) : stopped(false) {
         cap.open(src);
         cap.set(CAP_PROP_FPS, 60);
-        cap.set(CAP_PROP_FRAME_WIDTH, 320);
-        cap.set(CAP_PROP_FRAME_HEIGHT, 240);
-        
+        cap.set(CAP_PROP_FRAME_WIDTH, framesize[0]);
+        cap.set(CAP_PROP_FRAME_HEIGHT, framesize[1]);
         if(!cap.isOpened()) {
-            ROS_ERROR("Camera failed to open");
+            ROS_ERROR("kamera gagal dibuka");
             return;
         }
-        
-        cap >> frame;  // grab first frame
+        cap >> frame;
         captureThread = thread(&ThreadedCapture::update, this);
     }
     
@@ -206,45 +138,32 @@ public:
     
     void stop() {
         stopped = true;
-        if(captureThread.joinable()) {
-            captureThread.join();
-        }
+        if(captureThread.joinable()) captureThread.join();
         cap.release();
     }
     
-    ~ThreadedCapture() {
-        stop();
-    }
+    ~ThreadedCapture() { stop(); }
 };
 
-/* =========================
-   FIELD MASKING
-   ========================= */
+// ekstrak area lapangan hijau
 Mat extractField(const Mat& img) {
-    // Green field detection (adjust HSV values as needed)
     Mat hsv, mask, result;
     cvtColor(img, hsv, COLOR_BGR2HSV);
     
-    // Green field HSV range - adjust these values for your field
-    Scalar lower(35, 40, 40);
-    Scalar upper(85, 255, 255);
-    
-    inRange(hsv, lower, upper, mask);
+    // range hsv lapangan hijau
+    inRange(hsv, Scalar(35, 40, 40), Scalar(85, 255, 255), mask);
     
     Mat kernel = getStructuringElement(MORPH_RECT, Size(5,5));
     erode(mask, mask, kernel, Point(-1,-1), 2);
     dilate(mask, mask, kernel, Point(-1,-1), 5);
     
-    // Find largest contour (field)
     vector<vector<Point>> contours;
     findContours(mask, contours, RETR_TREE, CHAIN_APPROX_NONE);
     
     Mat fieldMask = Mat::zeros(img.size(), CV_8UC1);
-    if(!contours.empty()){
+    if(!contours.empty()) {
         auto maxContour = *max_element(contours.begin(), contours.end(),
-            [](const vector<Point>&a, const vector<Point>&b){
-                return contourArea(a) < contourArea(b);
-            });
+            [](const vector<Point>&a, const vector<Point>&b){ return contourArea(a) < contourArea(b); });
         vector<Point> hull;
         convexHull(maxContour, hull);
         fillConvexPoly(fieldMask, hull, Scalar(255));
@@ -254,507 +173,233 @@ Mat extractField(const Mat& img) {
     return result;
 }
 
-/* =========================
-   MAIN
-   ========================= */
-int main(int argc,char**argv){
-
-    ros::init(argc,argv,"vision_yolo_cpp");
+int main(int argc, char** argv) {
+    ros::init(argc, argv, "vision_yolo_cpp");
     ros::NodeHandle nh;
 
-    auto pub_state = nh.advertise<v2_detection::BallState>(
-        "/DEWO/image_processing/deteksi_bola/ball_state",10);
-    auto pub_coord = nh.advertise<v2_detection::BallCoordinate>(
-        "/DEWO/image_processing/deteksi_bola/coordinate",10);
-    auto pub_area  = nh.advertise<v2_detection::Ballarea>(
-        "/DEWO/image_processing/deteksi_bola/ball_area",10);
+    // publisher ros
+    auto pub_state = nh.advertise<v2_detection::BallState>("/DEWO/image_processing/deteksi_bola/ball_state", 10);
+    auto pub_coord = nh.advertise<v2_detection::BallCoordinate>("/DEWO/image_processing/deteksi_bola/coordinate", 10);
+    auto pub_area = nh.advertise<v2_detection::Ballarea>("/DEWO/image_processing/deteksi_bola/ball_area", 10);
 
-    string pkg=ros::package::getPath("vision_cpp");
-    YoloONNX yolo(pkg+"/src/best.onnx");
+    // load model yolo
+    string pkg = ros::package::getPath("vision_cpp");
+    YoloONNX yolo(pkg + "/src/best.onnx");
 
-    // Use threaded capture (matching Python WebcamVideoStream)
-    ROS_INFO("Initializing threaded camera capture...");
+    // inisialisasi kamera threaded
+    ROS_INFO("memulai kamera...");
     ThreadedCapture capture(0);
     
     fps_start_time = ros::Time::now().toSec();
-    last_seen=ros::Time::now().toSec();
+    waktu_sebelum = ros::Time::now().toSec();
     
-    ROS_INFO("Vision system ready - starting main loop");
+    ROS_INFO("sistem siap");
 
-    while(ros::ok()){
-
-        Mat frame = capture.read();
-        if(frame.empty()) {
-            ros::spinOnce();
-            continue;
-        }
+    while(ros::ok()) {
+        Mat img = capture.read();
+        if(img.empty()) { ros::spinOnce(); continue; }
         
-        Mat display_frame = frame.clone();
+        Mat img_result = img.clone();
 
-        /* ===== YOLO ===== */
-        if(state==NOTFOUND){
-            // Set dynamic blobsize for YOLO inference
+        // mode tracking hsv
+        if(detect_status == FOUND) {
+            // ekstrak lapangan
+            Mat field_img = extractField(img);
+            
+            // konversi ke hsv dan buat mask bola
+            Mat hsv, binary_ball;
+            cvtColor(field_img, hsv, COLOR_BGR2HSV);
+            inRange(hsv, Scalar(min_h, min_s, min_v), Scalar(max_h, max_s, max_v), binary_ball);
+            
+            // morphology untuk bersihkan noise
+            Mat kernel = Mat::ones(5, 5, CV_8U);
+            morphologyEx(binary_ball, binary_ball, MORPH_CLOSE, kernel);
+            morphologyEx(binary_ball, binary_ball, MORPH_OPEN, kernel);
+            
+            // cari kontur bola
+            vector<vector<Point>> contours;
+            findContours(binary_ball, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+            
+            bool objek_ditemukan = false;
+            
+            for(auto& contour : contours) {
+                double area = contourArea(contour);
+                
+                // filter area seperti python: area > ball_area/5 dan area < ball_area*1.1
+                if(area > ball_area/5 && area < ball_area*1.1 && contours.size() > 0) {
+                    Rect r = boundingRect(contour);
+                    float x_center = r.x + r.width/2.0f;
+                    
+                    // cek apakah dalam scan area dan area cukup besar
+                    if(scan_area[0] <= x_center && x_center <= scan_area[1] && (r.width*r.height) > 3000) {
+                        // update posisi bola
+                        int area_bola = r.width * r.height;
+                        float x_center_rect = r.x + r.width/2.0f;
+                        float y_center_rect = r.y + r.height/2.0f;
+                        center_ball = Point2f(x_center_rect, y_center_rect);
+                        last_box = r;
+                        
+                        // gambar bounding box kuning
+                        rectangle(img_result, r, Scalar(0, 255, 255), 2);
+                        
+                        // kirim data ros
+                        v2_detection::BallCoordinate bc;
+                        bc.pos_x = clamp(x_center_rect/framesize[0]*2-1, -1.0f, 1.0f);
+                        bc.pos_y = clamp(y_center_rect/framesize[1]*2-1, -1.0f, 1.0f);
+                        bc.obj_size = area_bola;
+                        pub_coord.publish(bc);
+                        
+                        v2_detection::Ballarea ba;
+                        ba.ballarea = area_bola;
+                        pub_area.publish(ba);
+                        
+                        v2_detection::BallState bs;
+                        bs.ball_status = "FOUND";
+                        pub_state.publish(bs);
+                        
+                        objek_ditemukan = true;
+                        
+                        // cek waktu untuk reset ke yolo
+                        double waktu_detect = map_value(area_bola, 0, 76800, 0.5, 80);
+                        double waktu_sesudah = ros::Time::now().toSec();
+                        double delta = waktu_sesudah - waktu_sebelum;
+                        
+                        ROS_INFO("ball area result: %d", area_bola);
+                        
+                        if(delta >= waktu_detect) {
+                            waktu_sebelum = ros::Time::now().toSec();
+                            detect_status = NOTFOUND;
+                        }
+                        break;
+                    }
+                    break;
+                }
+            }
+            
+            // jika tidak ditemukan, kembali ke yolo
+            if(!objek_ditemukan) {
+                detect_status = NOTFOUND;
+            }
+        }
+
+        // mode pencarian yolo
+        if(detect_status == NOTFOUND) {
+            // set ukuran input dinamis
             yolo.setInputSize(blobsize);
             
-            auto dets=yolo.infer(frame);
-            bool yolo_found = false;
+            auto dets = yolo.infer(img);
             
-            for(auto&d:dets){
-                // Lower confidence for faster detection (0.4 instead of 0.5)
-                if(d.class_id!=0 || d.conf<0.4f) continue;
-
-                Rect b=d.box;
-                Point2f nc(b.x+b.width/2.f,b.y+b.height/2.f);
-                int na=b.area();
-
-                // Direct assignment (no smoothing) - matching Python
-                center=nc;
-                smooth_center=nc;
-                ball_area=na;
-                smooth_area=na;
-                velocity=Point2f(0,0);
-                last_velocity=Point2f(0,0);
-                initialized=true;
-                last_box=b;
-
-                // Calculate scan area based on ball size (matching Python)
-                int in_area;
-                if(ball_area <= 5000){
-                    in_area = int(b.width * 3);
-                }else{
-                    in_area = b.width + 35;
-                }
-                scan_x={int(center.x-in_area),int(center.x+in_area)};
-
-                extractHSV(frame,b);
-                last_seen=ros::Time::now().toSec();
-                hsv_fail=0;
-                consecutive_found=0;
-                consecutive_lost=0;
-                yolo_skip_counter=0;
-                state=FOUND;
-                yolo_found=true;
+            if(dets.empty()) {
+                // tidak ada deteksi
+                ROS_INFO("yolo searching");
+                v2_detection::BallState bs;
+                bs.ball_status = "NOTFOUND";
+                pub_state.publish(bs);
                 
-                // Immediate publish on detection for fast response
-                v2_detection::BallState bs_immediate;
-                v2_detection::BallCoordinate bc_immediate;
-                v2_detection::Ballarea ba_immediate;
-                
-                bs_immediate.ball_status="FOUND";
-                bc_immediate.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                bc_immediate.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                bc_immediate.obj_size=ball_area;
-                ba_immediate.ballarea=ball_area;
-                
-                pub_state.publish(bs_immediate);
-                pub_coord.publish(bc_immediate);
-                pub_area.publish(ba_immediate);
-                
-                // Dynamic blobsize based on ball area (like Python)
-                if(ball_area <= 2800) {
-                    blobsize = 320;  // Far ball - medium size
-                } else {
-                    blobsize = 224;  // Close ball - small size for speed
-                }
-                
-                ROS_INFO("YOLO: Ball locked - Area:%d, Conf:%.2f, Blob:%d", ball_area, d.conf, blobsize);
-                break;
-            }
-            
-            if(!yolo_found) {
-                // Publish NOTFOUND only if really not detected
-                v2_detection::BallState bs_nf;
-                bs_nf.ball_status="NOTFOUND";
-                pub_state.publish(bs_nf);
-                
-                // Reset to large blobsize for searching
+                // reset blobsize ke 416 untuk search
                 blobsize = 416;
-            }
-        }
-
-        /* ===== HSV TRACK ===== */
-        else{
-            // Skip field masking for speed when tracking is stable
-            Mat track_frame = (consecutive_found > 5) ? frame : extractField(frame);
-
-            Mat hsv,mask;
-            cvtColor(track_frame,hsv,COLOR_BGR2HSV);
-            inRange(hsv,Scalar(min_h,min_s,min_v),Scalar(max_h,max_s,max_v),mask);
-
-            Mat kernel = Mat::ones(5,5,CV_8U);
-            morphologyEx(mask,mask,MORPH_CLOSE,kernel);
-            morphologyEx(mask,mask,MORPH_OPEN ,kernel);
-
-            vector<vector<Point>> contours;
-            findContours(mask,contours,RETR_EXTERNAL,CHAIN_APPROX_SIMPLE);
-
-            bool found=false;
-            double best_score = -1;
-            Point2f best_center;
-            int best_area = 0;
-            Rect best_box;
-
-            // Predict next position based on last velocity
-            Point2f predicted_center = center + last_velocity;
-
-            for(auto&c:contours){
-                double a=contourArea(c);
-                // More lenient area filtering: 15% to 130%
-                if(a<ball_area*0.15||a>ball_area*1.3) continue;
-                if(a<2000) continue; // Lower minimum threshold
-
-                Rect r=boundingRect(c);
-                int cx=r.x+r.width/2;
-                int cy=r.y+r.height/2;
-                
-                // Expanded scan area for fast balls
-                int expanded_scan = (scan_x[1]-scan_x[0])*1.5;
-                int scan_center = (scan_x[0]+scan_x[1])/2;
-                if(cx<scan_center-expanded_scan||cx>scan_center+expanded_scan) continue;
-
-                Point2f nc(cx,cy);
-                
-                // Score based on distance to predicted position + area similarity
-                float dist = norm(nc - predicted_center);
-                float area_diff = abs(a - ball_area) / (float)ball_area;
-                float score = 1.0f / (1.0f + dist/100.0f + area_diff*2.0f);
-                
-                if(score > best_score) {
-                    best_score = score;
-                    best_center = nc;
-                    best_area = int(a);
-                    best_box = r;
-                    found = true;
-                }
-            }
-
-            if(found){
-                // Calculate instantaneous velocity
-                Point2f instant_velocity = best_center - center;
-                
-                // Add to history buffer
-                velocity_history.push_back(instant_velocity);
-                if(velocity_history.size() > VELOCITY_HISTORY_SIZE) {
-                    velocity_history.pop_front();
-                }
-                
-                // Calculate smoothed velocity (average of history)
-                if(!velocity_history.empty()) {
-                    Point2f vel_sum(0,0);
-                    for(const auto& v : velocity_history) {
-                        vel_sum += v;
-                    }
-                    smooth_velocity = vel_sum * (1.0f / velocity_history.size());
+                ROS_INFO("blobsize: %d", blobsize);
+            } else {
+                // proses deteksi
+                for(auto& d : dets) {
+                    if(d.class_id != 0 || d.conf < 0.5f) continue;
                     
-                    // Calculate acceleration (change in velocity)
-                    acceleration = smooth_velocity - last_velocity;
-                }
-                
-                // Update last velocity for next frame
-                last_velocity = smooth_velocity;
-                
-                // Store position in history buffer
-                PositionRecord record;
-                record.position = best_center;
-                record.timestamp = ros::Time::now().toSec();
-                record.velocity = smooth_velocity;
-                record.area = best_area;
-                
-                position_history.push_back(record);
-                if(position_history.size() > POSITION_HISTORY_SIZE) {
-                    position_history.pop_front();
-                }
-                
-                // Update last known position
-                last_known_position = best_center;
-                ball_exited_frame = false;
-                
-                // Direct assignment
-                center=best_center;
-                smooth_center=best_center;
-                ball_area=best_area;
-                smooth_area=best_area;
-                last_box=best_box;
-
-                last_seen=ros::Time::now().toSec();
-                hsv_fail=0;
-                consecutive_found++;
-                consecutive_lost=0;
-                
-                // Immediate publish during tracking
-                v2_detection::BallCoordinate bc_track;
-                v2_detection::BallState bs_track;
-                v2_detection::Ballarea ba_track;
-                
-                bc_track.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                bc_track.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                bc_track.obj_size=ball_area;
-                bs_track.ball_status="FOUND";
-                ba_track.ballarea=ball_area;
-                
-                pub_coord.publish(bc_track);
-                pub_state.publish(bs_track);
-                pub_area.publish(ba_track);
-                
-                // Update dynamic blobsize based on ball area (like Python)
-                if(ball_area <= 2800) {
-                    blobsize = 320;  // Far ball - medium size
-                } else {
-                    blobsize = 224;  // Close ball - small size for speed
-                }
-                
-                // Print like Python
-                ROS_INFO_THROTTLE(0.1, "\nFOUND\nBall Area Result : %d\n", ball_area);
-            }else{
-                hsv_fail++;
-                consecutive_lost++;
-                consecutive_found=0;
-                
-                // Detect if ball exited frame and analyze exit direction
-                if(consecutive_lost == 1 && !ball_exited_frame && !position_history.empty()) {
-                    // Ball just lost - analyze last known trajectory
-                    ball_exited_frame = true;
-                    exit_velocity = smooth_velocity;
-                    exit_timestamp = ros::Time::now().toSec();
+                    Rect b = d.box;
+                    x_ball = b.x;
+                    y_ball = b.y;
+                    w_ball = b.width;
+                    h_ball = b.height;
                     
-                    // Determine exit direction based on velocity and position
-                    float vel_x = exit_velocity.x;
-                    float vel_y = exit_velocity.y;
-                    float pos_x = last_known_position.x;
-                    float pos_y = last_known_position.y;
+                    float x_center_ball = x_ball + w_ball/2.0f;
+                    float y_center_ball = y_ball + h_ball/2.0f;
+                    center_ball = Point2f(x_center_ball, y_center_ball);
+                    int obj_size_ball = w_ball * h_ball;
+                    ball_area = obj_size_ball;
+                    last_box = b;
                     
-                    // Analyze which edge the ball is heading towards
-                    std::vector<std::string> directions;
-                    
-                    if(vel_x > 2.0f) directions.push_back("RIGHT");
-                    else if(vel_x < -2.0f) directions.push_back("LEFT");
-                    
-                    if(vel_y > 2.0f) directions.push_back("DOWN");
-                    else if(vel_y < -2.0f) directions.push_back("UP");
-                    
-                    // Combine directions
-                    if(directions.empty()) {
-                        exit_direction = "STATIONARY";
-                    } else if(directions.size() == 1) {
-                        exit_direction = directions[0];
+                    // hitung scan area seperti python
+                    int in_area_ball;
+                    if(ball_area <= 5000) {
+                        in_area_ball = w_ball * 3;
                     } else {
-                        exit_direction = directions[0] + "-" + directions[1];
+                        in_area_ball = w_ball + 35;
                     }
+                    scan_area = {int(x_center_ball - in_area_ball), int(x_center_ball + in_area_ball)};
                     
-                    // Log detailed exit information
-                    ROS_WARN("\n========== BALL EXIT DETECTED ==========");
-                    ROS_WARN("Exit Direction: %s", exit_direction.c_str());
-                    ROS_WARN("Exit Velocity: (%.2f, %.2f) px/frame", vel_x, vel_y);
-                    ROS_WARN("Exit Speed: %.2f px/frame", norm(exit_velocity));
-                    ROS_WARN("Last Position: (%.1f, %.1f)", pos_x, pos_y);
-                    ROS_WARN("Last Area: %d", ball_area);
+                    // gambar bounding box biru dengan label
+                    rectangle(img_result, b, Scalar(255, 0, 0), 1);
+                    char text[50];
+                    snprintf(text, sizeof(text), "bola: %.2f", d.conf);
+                    putText(img_result, text, Point(b.x, b.y-5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,0,0), 1);
                     
-                    // Log last few positions
-                    ROS_WARN("Last %d positions:", (int)position_history.size());
-                    for(int i = position_history.size() - 1; i >= 0; i--) {
-                        auto& rec = position_history[i];
-                        double time_ago = exit_timestamp - rec.timestamp;
-                        ROS_WARN("  [%.2fs ago] Pos:(%.1f,%.1f) Vel:(%.2f,%.2f) Area:%d",
-                                time_ago, rec.position.x, rec.position.y,
-                                rec.velocity.x, rec.velocity.y, rec.area);
-                    }
-                    ROS_WARN("========================================\n");
-                }
-                
-                // Lock-in mechanism: don't lose tracking immediately
-                if(consecutive_lost > LOCK_OUT_THRESHOLD){
-                    state=NOTFOUND;
-                    initialized=false;
-                    last_velocity=Point2f(0,0);
-                    blobsize = 416;  // Reset to large size for searching
-                    ROS_INFO("Track lost after %d frames - switching to YOLO search (blob:%d)", consecutive_lost, blobsize);
-                } else {
-                    // Try prediction during temporary loss
-                    center = center + last_velocity;
-                    center.x = clamp(center.x, 0.f, (float)frame.cols-1);
-                    center.y = clamp(center.y, 0.f, (float)frame.rows-1);
+                    // kirim data ros
+                    v2_detection::BallCoordinate bc;
+                    bc.pos_x = clamp(x_center_ball/framesize[0]*2-1, -1.0f, 1.0f);
+                    bc.pos_y = clamp(y_center_ball/framesize[1]*2-1, -1.0f, 1.0f);
+                    bc.obj_size = obj_size_ball;
+                    pub_coord.publish(bc);
                     
-                    // Still publish during prediction
-                    v2_detection::BallCoordinate bc_pred;
-                    bc_pred.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-                    bc_pred.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-                    bc_pred.obj_size=ball_area;
-                    pub_coord.publish(bc_pred);
-                }
-            }
-        }
-
-        /* ===== ROS OUTPUT & DISPLAY ===== */
-        v2_detection::BallState bs;
-        v2_detection::BallCoordinate bc;
-        v2_detection::Ballarea ba;
-
-        if(state==FOUND){
-            bs.ball_status="FOUND";
-            bc.pos_x=clamp(center.x/frame.cols*2-1,-1.f,1.f);
-            bc.pos_y=clamp(center.y/frame.rows*2-1,-1.f,1.f);
-            bc.obj_size=ball_area;
-            ba.ballarea=ball_area;
-            pub_coord.publish(bc);
-            pub_area.publish(ba);
-            pub_state.publish(bs);
-            
-            rectangle(display_frame,last_box,Scalar(0,255,255),2);
-            circle(display_frame, Point(int(center.x), int(center.y)), 5, Scalar(0,0,255), -1);
-            
-            // Advanced velocity vector visualization with trajectory prediction
-            float vel_magnitude = norm(smooth_velocity);
-            if(vel_magnitude > 0.5) {
-                // Predicted trajectory path with acceleration (cyan)
-                if(norm(acceleration) > 0.05 && consecutive_found > 3) {
-                    vector<Point2f> trajectory_points;
-                    Point2f current_pos = center;
-                    Point2f current_vel = smooth_velocity;
-                    Point2f current_acc = acceleration;
+                    v2_detection::Ballarea ba;
+                    ba.ballarea = obj_size_ball;
+                    pub_area.publish(ba);
                     
-                    // Adaptive prediction length based on ball distance (smaller = farther = longer prediction)
-                    // Ball area: 2000-4000 = far, 4000-8000 = mid, 8000+ = close
-                    int prediction_frames;
-                    if(ball_area < 3000) {
-                        prediction_frames = 25;  // Far: predict 25 frames ahead
-                    } else if(ball_area < 6000) {
-                        prediction_frames = 18;  // Mid: predict 18 frames
+                    v2_detection::BallState bs;
+                    bs.ball_status = "FOUND";
+                    pub_state.publish(bs);
+                    
+                    ROS_INFO("bola [%.0f%%]", d.conf * 100);
+                    
+                    // ambil hsv dari bola
+                    get_hsv_val(img);
+                    detect_status = FOUND;
+                    waktu_sebelum = ros::Time::now().toSec();
+                    
+                    // update blobsize berdasarkan jarak bola
+                    if(obj_size_ball <= 2800) {
+                        blobsize = 320;
                     } else {
-                        prediction_frames = 12;  // Close: predict 12 frames
+                        blobsize = 224;
                     }
-                    
-                    // Physics-based simulation with damping
-                    const float acc_damping = 0.95f;      // Acceleration decay
-                    const float vel_damping = 0.98f;      // Velocity decay (air resistance)
-                    
-                    // Simulate trajectory with improved physics
-                    for(int i = 1; i <= prediction_frames; i++) {
-                        // Apply acceleration with damping
-                        current_vel += current_acc * 0.8f;
-                        current_acc *= acc_damping;  // Acceleration decays over time
-                        
-                        // Apply velocity damping (air resistance)
-                        current_vel *= vel_damping;
-                        
-                        // Update position
-                        current_pos += current_vel;
-                        
-                        // Bounds check
-                        if(current_pos.x < 0 || current_pos.x >= frame.cols ||
-                           current_pos.y < 0 || current_pos.y >= frame.rows) {
-                            break;
-                        }
-                        
-                        // Store every 2nd point for far distances, every point for close
-                        if(ball_area > 6000 || i % 2 == 0) {
-                            trajectory_points.push_back(current_pos);
-                        }
-                    }
-                    
-                    // Draw trajectory with enhanced visualization
-                    if(!trajectory_points.empty()) {
-                        // Draw connecting line for better visibility at distance
-                        for(size_t i = 0; i < trajectory_points.size() - 1; i++) {
-                            float alpha = 1.0f - (i / (float)trajectory_points.size());
-                            int intensity = (int)(alpha * 200) + 55;  // Range: 55-255
-                            line(display_frame, Point(trajectory_points[i]), 
-                                Point(trajectory_points[i+1]),
-                                Scalar(intensity, intensity, 0), 1, LINE_AA);  // Cyan line
-                        }
-                        
-                        // Draw dots on trajectory points
-                        for(size_t i = 0; i < trajectory_points.size(); i++) {
-                            float alpha = 1.0f - (i / (float)trajectory_points.size());
-                            // Larger dots for far distances
-                            int radius = (ball_area < 4000) ? max(3, 6 - (int)(i/3)) : max(2, 5 - (int)i);
-                            int intensity = (int)(alpha * 200) + 55;
-                            circle(display_frame, Point(trajectory_points[i]), radius, 
-                                  Scalar(intensity, intensity, 0), -1, LINE_AA);  // Cyan dots
-                        }
-                        
-                        // Draw endpoint marker (predicted landing)
-                        if(trajectory_points.size() > 5) {
-                            Point2f endpoint = trajectory_points.back();
-                            circle(display_frame, Point(endpoint), 8, Scalar(0,255,255), 2, LINE_AA);
-                            circle(display_frame, Point(endpoint), 2, Scalar(0,255,255), -1, LINE_AA);
-                        }
-                    }
+                    break;
                 }
                 
-                // Speed indicator text
-                char vel_text[50];
-                float speed_pixels_per_sec = vel_magnitude * fps;
-                snprintf(vel_text, sizeof(vel_text), "Speed: %.1f px/s", speed_pixels_per_sec);
-                putText(display_frame, vel_text, Point(5, 70), 
-                       FONT_HERSHEY_SIMPLEX, 0.4, Scalar(255,0,255), 1);
-                
-                // Direction indicator text
-                float angle = atan2(smooth_velocity.y, smooth_velocity.x) * 180.0 / M_PI;
-                char dir_text[50];
-                snprintf(dir_text, sizeof(dir_text), "Dir: %.0f deg | Acc: %.2f", 
-                         angle, norm(acceleration));
-                putText(display_frame, dir_text, Point(5, 85), 
-                       FONT_HERSHEY_SIMPLEX, 0.4, Scalar(255,0,255), 1);
-                
-                // Distance estimate based on ball area
-                const char* distance_str;
-                if(ball_area < 3000) distance_str = "FAR";
-                else if(ball_area < 6000) distance_str = "MID";
-                else distance_str = "CLOSE";
-                
-                char dist_text[50];
-                snprintf(dist_text, sizeof(dist_text), "Range: %s (Area:%d)", distance_str, ball_area);
-                putText(display_frame, dist_text, Point(5, 100), 
-                       FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0,255,255), 1);
-            }
-        }else{
-            bs.ball_status="NOTFOUND";
-            pub_state.publish(bs);
-            
-            // Display exit information if ball recently exited
-            if(ball_exited_frame && !exit_direction.empty()) {
-                char exit_text[100];
-                snprintf(exit_text, sizeof(exit_text), "BALL EXITED: %s", exit_direction.c_str());
-                putText(display_frame, exit_text, Point(5, 120), 
-                       FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 255), 2);
-                
-                char vel_text[100];
-                snprintf(vel_text, sizeof(vel_text), "Exit Vel: (%.1f, %.1f) Speed:%.1f",
-                        exit_velocity.x, exit_velocity.y, norm(exit_velocity));
-                putText(display_frame, vel_text, Point(5, 145), 
-                       FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0, 0, 255), 1);
+                // jika tidak ada bola class 0
+                if(detect_status != FOUND) {
+                    v2_detection::BallCoordinate bc;
+                    bc.pos_x = 0; bc.pos_y = 0; bc.obj_size = 0;
+                    pub_coord.publish(bc);
+                    
+                    v2_detection::BallState bs;
+                    bs.ball_status = "NOTFOUND";
+                    pub_state.publish(bs);
+                    
+                    ROS_INFO("bola tidak ditemukan");
+                }
             }
         }
-        
-        // Calculate and display FPS
+
+        // hitung dan tampilkan fps
         calculate_fps();
         
-        // Draw FPS and status on display
-        char fps_text[50];
+        // tampilkan info di layar
+        char fps_text[20];
         snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", fps);
-        putText(display_frame, fps_text, Point(5, 15), 
-                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
+        putText(img_result, fps_text, Point(5, 15), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
         
-        // Display blobsize (like Python)
-        char blob_text[20];
+        char blob_text[10];
         snprintf(blob_text, sizeof(blob_text), "%d", blobsize);
-        putText(display_frame, blob_text, Point(280, 15), 
-                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
+        putText(img_result, blob_text, Point(280, 15), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 2);
         
-        char status_text[50];
-        snprintf(status_text, sizeof(status_text), "%s", 
-                 state==FOUND ? "TRACKING" : "SEARCHING");
-        putText(display_frame, status_text, Point(5, 35), 
-                FONT_HERSHEY_SIMPLEX, 0.5, 
-                state==FOUND ? Scalar(0, 255, 0) : Scalar(0, 0, 255), 2);
+        // tampilkan status deteksi
+        ROS_INFO("\n%s", detect_status == FOUND ? "FOUND" : "NOTFOUND");
         
-        imshow("VISION_CPP", display_frame);
+        imshow("VISION_CPP", img_result);
         waitKey(1);
-
+        
         ros::spinOnce();
     }
     
     capture.stop();
-    ROS_INFO("Vision system shutdown");
+    ROS_INFO("sistem berhenti");
     return 0;
 }
