@@ -95,8 +95,8 @@ vector<Detection> YoloONNX::infer(const cv::Mat& image)
     vector<Detection> detections;
     detections.reserve(20);
     
-    // confidence lebih rendah untuk deteksi bola partial
-    const float conf_threshold = 0.30f;
+    // threshold rendah di sini, filter final dilakukan di main.cpp (0.5f seperti Python)
+    const float conf_threshold = 0.25f;
     
     for(int i = 0; i < num_boxes; i++) {
         float conf = out[i * elements + 4];

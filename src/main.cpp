@@ -331,53 +331,49 @@ int main(int argc, char** argv) {
                 v2_detection::BallState bs;
                 bs.ball_status = "NOTFOUND";
                 pub_state.publish(bs);
-                
-                // target blobsize 416 untuk search mode
-                target_blobsize = 320;
+                target_blobsize = 416;
             } else {
-                // pilih deteksi dengan confidence tertinggi
-                Detection best_det = dets[0];
-                for(auto& d : dets) {
-                    if(d.class_id == 0 && d.conf > best_det.conf) {
-                        best_det = d;
+                // iterasi deteksi cari class 0 (bola) dengan confidence >= 0.5 seperti Python
+                Detection best_det;
+                bool found_ball = false;
+                
+                for(auto& det : dets) {
+                    // filter class 0 dan confidence
+                    if(det.class_id == 0 && det.conf >= 0.5f) {
+                        if(!found_ball || det.conf > best_det.conf) {
+                            best_det = det;
+                            found_ball = true;
+                        }
                     }
                 }
                 
-                // filter confidence minimum
-                if(best_det.class_id == 0 && best_det.conf >= 0.35f) {
+                if(found_ball) {
                     Rect b = best_det.box;
                     
-                    // apply smoothing untuk bounding box yang konsisten
-                    Rect smoothed = smoothBox(b);
-                    
-                    x_ball = smoothed.x;
-                    y_ball = smoothed.y;
-                    w_ball = smoothed.width;
-                    h_ball = smoothed.height;
+                    // set bounding box tanpa smoothing dulu
+                    x_ball = b.x;
+                    y_ball = b.y;
+                    w_ball = b.width;
+                    h_ball = b.height;
                     
                     float x_center_ball = x_ball + w_ball/2.0f;
                     float y_center_ball = y_ball + h_ball/2.0f;
                     center_ball = Point2f(x_center_ball, y_center_ball);
                     int obj_size_ball = w_ball * h_ball;
                     ball_area = obj_size_ball;
-                    last_box = smoothed;
+                    last_box = b;
                     
-                    // hitung scan area dengan margin lebih besar
-                    int in_area_ball;
-                    if(ball_area <= 5000) {
-                        in_area_ball = w_ball * 4;  // lebih besar untuk partial ball
-                    } else {
-                        in_area_ball = w_ball + 50;
-                    }
+                    // scan area untuk tracking phase
+                    int in_area_ball = w_ball * 3;
                     scan_area = {int(x_center_ball - in_area_ball), int(x_center_ball + in_area_ball)};
                     
-                    // gambar bounding box biru dengan label
-                    rectangle(img_result, smoothed, Scalar(255, 0, 0), 2);
+                    // gambar bounding box
+                    rectangle(img_result, b, Scalar(255, 0, 0), 1);
                     char text[50];
                     snprintf(text, sizeof(text), "bola: %.0f%%", best_det.conf * 100);
-                    putText(img_result, text, Point(smoothed.x, smoothed.y-5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,0,0), 1);
+                    putText(img_result, text, Point(b.x, b.y-5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,0,0), 1);
                     
-                    // kirim data ros
+                    // kirim ROS data
                     v2_detection::BallCoordinate bc;
                     bc.pos_x = clamp(x_center_ball/framesize[0]*2-1, -1.0f, 1.0f);
                     bc.pos_y = clamp(y_center_ball/framesize[1]*2-1, -1.0f, 1.0f);
@@ -394,22 +390,24 @@ int main(int argc, char** argv) {
                     
                     ROS_INFO("bola [%.0f%%] area:%d", best_det.conf * 100, obj_size_ball);
                     
-                    // ambil hsv dari bola
+                    // extract HSV value seperti Python
                     get_hsv_val(img);
                     detect_status = FOUND;
                     waktu_sebelum = ros::Time::now().toSec();
                     
-                    // target blobsize berdasarkan jarak bola (transisi bertahap)
+                    // update blobsize berdasarkan ball area
                     if(obj_size_ball <= 2800) {
                         target_blobsize = 320;
                     } else {
                         target_blobsize = 224;
                     }
                 } else {
+                    // tidak ada ball dengan confidence cukup
                     v2_detection::BallState bs;
                     bs.ball_status = "NOTFOUND";
                     pub_state.publish(bs);
-                    ROS_INFO("bola confidence terlalu rendah");
+                    ROS_INFO("yolo searching - no ball conf >= 0.5");
+                    target_blobsize = 416;
                 }
             }
         }
