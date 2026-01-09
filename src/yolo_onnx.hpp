@@ -22,25 +22,16 @@ private:
     Ort::Session session;
     Ort::SessionOptions session_options;
     
-    int input_width = 416;
+    int input_width = 416;   // fixed onnx model size
     int input_height = 416;
-    int blob_size = 416;
-    int last_blob_size = 0;  // cache untuk skip resize ulang
-    
-    // pre-allocated buffers untuk hindari alokasi berulang
-    cv::Mat padded_buffer;
-    cv::Mat float_buffer;
-    std::vector<float> input_tensor_values;
-    float cached_scale = 0;
-    int cached_pad_x = 0;
-    int cached_pad_y = 0;
+    int blob_size = 416;     // dynamic processing size
     
     void printModelInfo();
 
 public:
     YoloONNX(const string& model_path);
     vector<Detection> infer(const cv::Mat& image);
-    void setInputSize(int size);
+    void setInputSize(int size);  // set dynamic blobsize
 };
 
 #endif
