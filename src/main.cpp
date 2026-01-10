@@ -30,8 +30,6 @@ const float g_fisheye = 1.0f;  // 0.34 jika fisheye, 1.0 normal
 double fps = 0.0;
 int frame_counter = 0;
 double fps_start_time = 0.0;
-int yolo_frame_interval = 2;  // jalankan YOLO setiap 2 frame untuk efisiensi
-int yolo_frame_counter = 0;   // penghitung frame untuk interval YOLO
 
 // ============ UTILITY FUNCTIONS ============
 int min_value(int a, int b) {
@@ -355,12 +353,6 @@ int main(int argc, char** argv) {
 
         // ============ NOTFOUND STATE - YOLO DETECTION ============
         if(detect_status == "NOTFOUND") {
-            yolo_frame_counter++;  // increment counter untuk interval YOLO
-            
-            // jalankan YOLO hanya setiap N frame untuk mengurangi beban CPU
-            if(yolo_frame_counter >= yolo_frame_interval) {
-                yolo_frame_counter = 0;  // reset counter setelah YOLO dijalankan
-                
             yolo.setInputSize(blobsize);
             auto dets = yolo.infer(img);
             
@@ -460,12 +452,6 @@ int main(int argc, char** argv) {
                     pub_state.publish(bs);
                     ROS_INFO("bola not found (after yolov5)");
                 }
-            }
-            } else {
-                // skip frame ini, YOLO tidak dijalankan untuk efisiensi
-                v2_detection::BallState bs;
-                bs.ball_status = "NOTFOUND";
-                pub_state.publish(bs);
             }
         }
 
