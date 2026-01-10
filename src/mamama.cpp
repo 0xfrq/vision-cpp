@@ -10,8 +10,6 @@
 #include <mutex>
 #include <algorithm>
 #include <cmath>
-#include <iostream>
-#include <iomanip>
 #include "yolo_onnx.hpp"
 
 // ============ GLOBAL STATE (EXACT PYTHON MIRROR) ============
@@ -30,8 +28,6 @@ const float g_fisheye = 1.0f;  // 0.34 jika fisheye, 1.0 normal
 double fps = 0.0;
 int frame_counter = 0;
 double fps_start_time = 0.0;
-int yolo_frame_interval = 2;  // jalankan YOLO setiap 2 frame untuk efisiensi
-int yolo_frame_counter = 0;   // penghitung frame untuk interval YOLO
 
 // ============ UTILITY FUNCTIONS ============
 int min_value(int a, int b) {
@@ -355,12 +351,6 @@ int main(int argc, char** argv) {
 
         // ============ NOTFOUND STATE - YOLO DETECTION ============
         if(detect_status == "NOTFOUND") {
-            yolo_frame_counter++;  // increment counter untuk interval YOLO
-            
-            // jalankan YOLO hanya setiap N frame untuk mengurangi beban CPU
-            if(yolo_frame_counter >= yolo_frame_interval) {
-                yolo_frame_counter = 0;  // reset counter setelah YOLO dijalankan
-                
             yolo.setInputSize(blobsize);
             auto dets = yolo.infer(img);
             
@@ -461,26 +451,23 @@ int main(int argc, char** argv) {
                     ROS_INFO("bola not found (after yolov5)");
                 }
             }
-            } else {
-                // skip frame ini, YOLO tidak dijalankan untuk efisiensi
-                v2_detection::BallState bs;
-                bs.ball_status = "NOTFOUND";
-                pub_state.publish(bs);
-            }
         }
 
         // ============ DISPLAY ============
         calculate_fps();
         
-        // tampilkan FPS dan status ke console secara real-time
-        std::cout << "\r[FPS: " << std::fixed << std::setprecision(2) << fps 
-                  << "] [Status: " << detect_status 
-                  << "] [Blobsize: " << blobsize << "]" << std::flush;
+        char fps_str[30];
+        snprintf(fps_str, sizeof(fps_str), "FPS: %.2f", fps);
+        cv::putText(img_result, fps_str, cv::Point(5, 15), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         
-        // GUI dimatikan untuk performa lebih baik
-        // cv::imshow("VISION_CPP", img_result);
-        // cv::waitKey(1);
+        char blob_str[20];
+        snprintf(blob_str, sizeof(blob_str), "%d", blobsize);
+        cv::putText(img_result, blob_str, cv::Point(280, 15), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         
+        cv::imshow("VISION_CPP", img_result);
+        cv::waitKey(1);
+        
+        std::cout << std::endl << detect_status << std::endl;
         ros::spinOnce();
     }
     
