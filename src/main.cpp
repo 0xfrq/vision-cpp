@@ -1,5 +1,4 @@
 // deteksi bola yolov5 + hsv tracking untuk robot sepak bola
-// EXACT port dari python gandamana_vision.py ball_detect()
 #include <ros/ros.h>
 #include <ros/package.h>
 #include <v2_detection/BallState.h>
@@ -14,24 +13,24 @@
 #include <iomanip>
 #include "yolo_onnx.hpp"
 
-// ============ GLOBAL STATE (EXACT PYTHON MIRROR) ============
+// variabel global untuk state deteksi
 int min_h = 0, min_s = 0, min_v = 0;
 int max_h = 0, max_s = 0, max_v = 0;
 int x_ball = 0, y_ball = 0, w_ball = 0, h_ball = 0;
 float x_center_ball = 0, y_center_ball = 0;
 int ball_area = 0;
 
-std::string detect_status = "NOTFOUND";  // NOTFOUND atau FOUND
+std::string detect_status = "NOTFOUND";  // status deteksi: notfound atau found
 double waktu_sebelum = 0.0;
 std::vector<float> scan_area = {0, 0};
 const int framesize[2] = {320, 240};
 int blobsize = 416;
-const float g_fisheye = 1.0f;  // 0.34 jika fisheye, 1.0 normal
+const float g_fisheye = 1.0f;  // 0.34 untuk fisheye, 1.0 untuk normal
 double fps = 0.0;
 int frame_counter = 0;
 double fps_start_time = 0.0;
 
-// ============ UTILITY FUNCTIONS ============
+// fungsi utilitas untuk perhitungan
 int min_value(int a, int b) {
     return (a <= b) ? a : b;
 }
@@ -46,7 +45,7 @@ double map_value(double source_val, double source_min, double source_max, double
     return target_min + ((source_val - source_min) * ((target_max - target_min) / (source_max - source_min)));
 }
 
-// ============ THREADED CAMERA ============
+// class untuk capture kamera dengan thread terpisah
 class ThreadedCapture {
 private:
     cv::VideoCapture cap;
@@ -94,7 +93,7 @@ public:
     ~ThreadedCapture() { stop(); }
 };
 
-// ============ CALCULATE FPS ============
+// hitung fps setiap 0.2 detik
 void calculate_fps() {
     frame_counter++;
     double current_time = ros::Time::now().toSec();
@@ -106,7 +105,7 @@ void calculate_fps() {
     }
 }
 
-// ============ EXTRACT FIELD (GREEN AREA) ============
+// ekstrak area lapangan hijau dari gambar
 cv::Mat extractField(const cv::Mat& img) {
     cv::Mat hsv, mask, result;
     cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
@@ -133,7 +132,7 @@ cv::Mat extractField(const cv::Mat& img) {
     return result;
 }
 
-// ============ GET HSV VALUE - EXACT PYTHON PORT ============
+// ambil nilai hsv dari 8 titik sampling pada bounding box bola
 void get_hsv_val(const cv::Mat& img) {
     int x = x_ball;
     int y = y_ball;
@@ -150,19 +149,19 @@ void get_hsv_val(const cv::Mat& img) {
     ball_area = w * h;
     ROS_INFO("LUAS BOLA : %d", ball_area);
     
-    // compute dot positions (EXACT PYTHON LOGIC)
+    // hitung posisi titik tengah untuk sampling
     int dot_tengah_x = (x1 + x2) / 2;
     int dot_tengah_y = (y1 + y2) / 2;
     
-    // collect sampling points
+    // kumpulkan 5 titik sampling dari tepi bounding box
     std::vector<std::pair<int,int>> dots;
-    dots.push_back({dot_tengah_x, dot_tengah_y});                                      // dot_tengah
-    dots.push_back({(x1 + dot_tengah_x) / 2, (y1 + dot_tengah_y) / 2});               // dot_sepertiga_kanan
-    dots.push_back({(x2 + dot_tengah_x) / 2, (y2 + dot_tengah_y) / 2});               // dot_duapertiga_kanan
-    dots.push_back({(dot_tengah_x + (x1 + (x2-x1))) / 2, (dot_tengah_y + y1) / 2});   // dot_sepertiga_kiri
-    dots.push_back({(x1 + dot_tengah_x) / 2, (y1 + (y2-y1) + dot_tengah_y) / 2});     // dot_duapertiga_kiri
+    dots.push_back({dot_tengah_x, dot_tengah_y});                                      // titik tengah
+    dots.push_back({(x1 + dot_tengah_x) / 2, (y1 + dot_tengah_y) / 2});               // sepertiga kanan
+    dots.push_back({(x2 + dot_tengah_x) / 2, (y2 + dot_tengah_y) / 2});               // duapertiga kanan
+    dots.push_back({(dot_tengah_x + (x1 + (x2-x1))) / 2, (dot_tengah_y + y1) / 2});   // sepertiga kiri
+    dots.push_back({(x1 + dot_tengah_x) / 2, (y1 + (y2-y1) + dot_tengah_y) / 2});     // duapertiga kiri
     
-    // sample HSV at each point
+    // sampling nilai hsv dari setiap titik
     std::vector<int> H, S, V;
     for(auto& dot : dots) {
         int px = std::max(0, std::min(img.cols-1, dot.first));
@@ -178,7 +177,7 @@ void get_hsv_val(const cv::Mat& img) {
         V.push_back(hsv_val[2]);
     }
     
-    // sample atas_tengah point (extra point like Python - using h//5 not h//4)
+    // sampling titik atas tengah menggunakan formula h/5
     int atas_py = (dot_tengah_y + y1 + h/5) / 2;
     int atas_px = dot_tengah_x;
     atas_py = std::max(0, std::min(img.rows-1, atas_py));
@@ -191,7 +190,7 @@ void get_hsv_val(const cv::Mat& img) {
     S.push_back(hsv_val_atas[1]);
     V.push_back(hsv_val_atas[2]);
     
-    // sample bawah_tengah point
+    // sampling titik bawah tengah
     int bawah_py = (dot_tengah_y + y2) / 2;
     int bawah_px = dot_tengah_x;
     bawah_py = std::max(0, std::min(img.rows-1, bawah_py));
@@ -204,7 +203,7 @@ void get_hsv_val(const cv::Mat& img) {
     S.push_back(hsv_val_bawah[1]);
     V.push_back(hsv_val_bawah[2]);
     
-    // compute min/max
+    // cari nilai min dan max dari semua sampling
     min_h = *std::min_element(H.begin(), H.end());
     min_s = *std::min_element(S.begin(), S.end());
     min_v = *std::min_element(V.begin(), V.end());
@@ -212,7 +211,7 @@ void get_hsv_val(const cv::Mat& img) {
     max_s = *std::max_element(S.begin(), S.end());
     max_v = *std::max_element(V.begin(), V.end());
     
-    // apply thresholds EXACTLY like Python
+    // terapkan batas threshold untuk hue dan saturation
     int nilai_maksimum_h = 33;
     if(max_h >= nilai_maksimum_h) max_h = nilai_maksimum_h;
     
@@ -223,7 +222,7 @@ void get_hsv_val(const cv::Mat& img) {
              min_h, min_s, min_v, max_h, max_s, max_v);
 }
 
-// ============ MAIN ============
+// fungsi utama program
 int main(int argc, char** argv) {
     ros::init(argc, argv, "vision_yolo_cpp");
     ros::NodeHandle nh;
@@ -249,14 +248,14 @@ int main(int argc, char** argv) {
         
         cv::Mat img_result = img.clone();
 
-        // ============ FOUND STATE - HSV TRACKING ============
+        // mode found: tracking hsv bola yang sudah terdeteksi
         if(detect_status == "FOUND") {
-            // Extract field EVERY frame (like Python) with proper HSV values
+            // ekstrak lapangan setiap frame untuk adaptasi pencahayaan
             cv::Mat field_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5,5));
             cv::Mat hsv_image;
             cv::cvtColor(img, hsv_image, cv::COLOR_BGR2HSV);
             
-            // Field HSV values (calibrated for green field)
+            // nilai hsv untuk deteksi lapangan hijau
             cv::Mat field_binary;
             cv::inRange(hsv_image, cv::Scalar(35, 40, 40), cv::Scalar(85, 255, 255), field_binary);
             cv::erode(field_binary, field_binary, field_kernel, cv::Point(-1,-1), 2);
@@ -278,7 +277,7 @@ int main(int argc, char** argv) {
                 cv::bitwise_and(img, img, field_img, field_mask);
             }
             
-            // Now apply ball HSV tracking on field-masked image
+            // terapkan tracking hsv bola pada area lapangan
             cv::Mat frame_copy = field_img.clone();
             cv::Mat hsv;
             cv::cvtColor(frame_copy, hsv, cv::COLOR_BGR2HSV);
@@ -299,20 +298,20 @@ int main(int argc, char** argv) {
             for(auto& contour : contours) {
                 double area = cv::contourArea(contour);
                 
-                // EXACT PYTHON FILTER
+                // filter area sesuai ukuran bola yang dicari
                 if(area > ball_area/5 && area < ball_area*1.1 && contourLength > 0) {
                     cv::Rect r = cv::boundingRect(contour);
                     float x_center = r.x + r.width/2.0f;
                     int area_bola = r.width * r.height;
                     
-                    // check scan_area and min area
+                    // cek apakah objek dalam scan area dan ukuran minimum
                     if(scan_area[0] <= x_center && x_center <= scan_area[1] && area_bola > (3000*g_fisheye)) {
                         float x_center_rect = r.x + r.width/2.0f;
                         float y_center_rect = r.y + r.height/2.0f;
                         
                         cv::rectangle(img_result, r, cv::Scalar(0, 255, 255), 2);
                         
-                        // SEND ROS
+                        // kirim data koordinat bola via ros
                         v2_detection::BallCoordinate bc;
                         bc.pos_x = (float)(x_center_rect/framesize[0]*2 - 1);
                         bc.pos_y = (float)(y_center_rect/framesize[1]*2 - 1);
@@ -329,7 +328,7 @@ int main(int argc, char** argv) {
                         
                         objek_ditemukan = true;
                         
-                        // check timing to reset to yolo
+                        // cek waktu untuk reset ke mode yolo
                         double waktu_detect = map_value(area_bola, 0, 76800, 0.5, 80);
                         double waktu_sesudah = ros::Time::now().toSec();
                         double delta = waktu_sesudah - waktu_sebelum;
@@ -351,7 +350,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ============ NOTFOUND STATE - YOLO DETECTION ============
+        // mode notfound: cari bola menggunakan yolo
         if(detect_status == "NOTFOUND") {
             yolo.setInputSize(blobsize);
             auto dets = yolo.infer(img);
@@ -366,12 +365,12 @@ int main(int argc, char** argv) {
             } else {
                 bool jika_ditemukan = false;
                 
-                // ITERATE DETECTIONS - EXACT PYTHON LOGIC
+                // iterasi semua deteksi yolo untuk cari bola
                 for(auto& det : dets) {
                     float conf = det.conf;
                     int cls = det.class_id;
                     
-                    // Skip if confidence < 0.5 (model.conf)
+                    // skip jika confidence di bawah threshold 0.5
                     if(conf < 0.5f) continue;
                     
                     int x = det.box.x;
@@ -379,7 +378,7 @@ int main(int argc, char** argv) {
                     int w = det.box.width;
                     int h = det.box.height;
                     
-                    // Find class 0 (ball)
+                    // cari class 0 yang merupakan bola
                     if(cls == 0) {
                         x_ball = x;
                         y_ball = y;
@@ -390,7 +389,7 @@ int main(int argc, char** argv) {
                         y_center_ball = y_ball + h_ball/2.0f;
                         int obj_size_ball = w_ball * h_ball;
                         
-                        // compute scan_area EXACTLY like Python
+                        // hitung area scan untuk tracking hsv selanjutnya
                         int in_area_ball;
                         if(ball_area <= (5000*g_fisheye)) {
                             in_area_ball = w_ball * 3;
@@ -399,13 +398,13 @@ int main(int argc, char** argv) {
                         }
                         scan_area = {x_center_ball - (float)in_area_ball, x_center_ball + (float)in_area_ball};
                         
-                        // draw box
+                        // gambar bounding box deteksi
                         cv::rectangle(img_result, det.box, cv::Scalar(255, 0, 0), 1);
                         char text[50];
                         snprintf(text, sizeof(text), "bola: %.0f%%", conf * 100);
                         cv::putText(img_result, text, cv::Point(x, y-5), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,0,0), 1);
                         
-                        // SEND ROS
+                        // kirim data deteksi via ros
                         v2_detection::BallCoordinate bc;
                         bc.pos_x = (float)(x_center_ball/framesize[0]*2 - 1);
                         bc.pos_y = (float)(y_center_ball/framesize[1]*2 - 1);
@@ -422,12 +421,12 @@ int main(int argc, char** argv) {
                         
                         ROS_INFO("bola [%.0f%%]", conf * 100);
                         
-                        // extract HSV
+                        // ekstrak nilai hsv untuk tracking
                         get_hsv_val(img);
                         detect_status = "FOUND";
                         waktu_sebelum = ros::Time::now().toSec();
                         
-                        // update blobsize
+                        // update ukuran input yolo berdasarkan jarak bola
                         if(obj_size_ball <= (2800*g_fisheye)) {
                             blobsize = 320;
                         } else if(obj_size_ball > (2800*g_fisheye)) {
@@ -435,11 +434,11 @@ int main(int argc, char** argv) {
                         }
                         
                         jika_ditemukan = true;
-                        break;  // CRITICAL: break after finding ball
+                        break;  // berhenti setelah menemukan bola pertama
                     }
                 }
                 
-                // if no ball found
+                // jika tidak ada bola ditemukan oleh yolo
                 if(!jika_ditemukan) {
                     v2_detection::BallCoordinate bc;
                     bc.pos_x = 0;
@@ -455,15 +454,15 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ============ DISPLAY ============
+        // tampilkan info dan update ros
         calculate_fps();
         
-        // tampilkan FPS dan status ke console secara real-time
+        // tampilkan fps dan status ke console secara real-time
         std::cout << "\r[FPS: " << std::fixed << std::setprecision(2) << fps 
                   << "] [Status: " << detect_status 
                   << "] [Blobsize: " << blobsize << "]" << std::flush;
         
-        // GUI dimatikan untuk performa lebih baik
+        // gui dimatikan untuk performa lebih baik
         // cv::imshow("VISION_CPP", img_result);
         // cv::waitKey(1);
         
