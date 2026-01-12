@@ -157,7 +157,7 @@ void get_hsv_val(const cv::Mat& img) {
     int y2 = y + h;
     
     ball_area = w * h;
-    ROS_INFO("LUAS BOLA : %d", ball_area);
+    // ROS_INFO("LUAS BOLA : %d", ball_area);
     
     // hitung koordinat titik tengah bounding box
     int dot_tengah_x = (x1 + x2) / 2;
@@ -229,8 +229,8 @@ void get_hsv_val(const cv::Mat& img) {
     int nilai_minimum_s = 160;
     if(min_s <= nilai_minimum_s) min_s = nilai_minimum_s;
     
-    ROS_INFO("min hue %d min sat %d min val %d max hue %d max sat %d max val %d", 
-             min_h, min_s, min_v, max_h, max_s, max_v);
+    // ROS_INFO("min hue %d min sat %d min val %d max hue %d max sat %d max val %d", 
+    //          min_h, min_s, min_v, max_h, max_s, max_v);
 }
 
 // fungsi utama program
@@ -480,6 +480,7 @@ int main(int argc, char** argv) {
         calculate_fps();
         
         // tampilkan fps dan status di console
+        ROS_INFO(fps);
         std::cout << "\r[FPS: " << std::fixed << std::setprecision(2) << fps 
                   << "] [Status: " << detect_status 
                   << "] [Blobsize: " << blobsize << "]" << std::flush;
